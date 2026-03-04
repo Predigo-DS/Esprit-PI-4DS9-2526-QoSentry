@@ -3,13 +3,13 @@
 ## Overview
 This project was developed as part of the **PIDEV – 4th Year Engineering Program DS speciality** at **Esprit School of Engineering** (Academic Year 2025–2026).
 
-**QoS-Sentry** is an intelligent, platform-agnostic solution designed to shift network management from a "reactive cycle of firefighting" to a proactive, AI-driven approach. By combining Network Engineering, Data Science, and Generative AI, the platform addresses critical issues such as alert fatigue, static threshold management, and the lack of predictive insights in traditional monitoring tools.
+**QoSentry** is an intelligent, platform-agnostic solution designed to shift network management from a "reactive cycle of firefighting" to a proactive, AI-driven approach. By combining Network Engineering, Data Science, and Generative AI, the platform addresses critical issues such as alert fatigue, static threshold management, and the lack of predictive insights in traditional monitoring tools.
 
 ## Features
 - **Predictive Analytics:** Anticipating SLA breaches before they impact end-users using time-series forecasting.
 - **Risk-Free Simulation:** A "Digital Twin" sandbox environment (Mininet/SDN) to test configuration changes safely.
 - **Intelligent Automation:** Reducing manual intervention via reinforcement learning-based recommendations.
-- **RAG-Powered Intelligibility:** A specialized **QoS-Buddy** agent that uses Retrieval-Augmented Generation (RAG) to translate complex technical logs into actionable executive summaries.
+- **RAG-Powered Intelligibility:** A specialized **QoSentry** agent that uses Retrieval-Augmented Generation (RAG) to translate complex technical logs into actionable executive summaries.
 - **Explainability-First Design (XAI):** Clear attribution and explanation for AI-driven decisions to ensure human-in-the-loop control.
 
 ## Tech Stack
