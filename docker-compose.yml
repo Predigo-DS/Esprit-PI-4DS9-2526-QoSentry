@@ -1,6 +1,29 @@
 services:
 
   # ─────────────────────────────────────────
+  # POSTGRES (LangGraph checkpoints)
+  # ─────────────────────────────────────────
+  postgres:
+    image: postgres:16
+    container_name: qos-postgres
+    environment:
+      - POSTGRES_DB=qosbuddy
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=postgres
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - qos-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d qosbuddy"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ─────────────────────────────────────────
   # VECTOR STORE
   # ─────────────────────────────────────────
   qdrant:
@@ -21,7 +44,7 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
-      start_period : 300s
+      start_period : 90s
 
   # ─────────────────────────────────────────
   # RAG SERVICE  (ingestion + retrieval)
@@ -38,7 +61,7 @@ services:
     environment:
       - QDRANT_HOST=qdrant
       - QDRANT_PORT=6333
-      - EMBEDDING_MODEL=${EMBEDDING_MODEL:-sentence-transformers/all-MiniLM-L6-v2}
+      - EMBEDDING_MODEL=${EMBEDDING_MODEL:-BAAI/bge-small-en-v1.5}
     volumes:
       - ./ai-services/rag/app:/app
       - ./data:/data:ro
@@ -51,8 +74,9 @@ services:
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8001/health"]
       interval: 15s
-      timeout: 5s
-      retries: 3
+      timeout: 10s
+      retries: 5
+      start_period : 30s
 
   # ─────────────────────────────────────────
   # AGENT SERVICE  (LangGraph orchestration)
@@ -68,13 +92,13 @@ services:
       - ./ai-services/agent/.env
     environment:
       - RAG_SERVICE_URL=http://rag:8001
-      - LLM_MODEL=${LLM_MODEL:-llama3-8b-8192}
-      - GROQ_API_KEY=${GROQ_API_KEY}
+      - CHECKPOINT_DB_URI=postgresql://postgres:postgres@postgres:5432/qosbuddy
     volumes:
       - ./ai-services/agent/app:/app
+      - ./config:/app/config:ro
     depends_on:
-      rag:
-        condition: service_healthy
+      - postgres
+      - rag
     networks:
       - qos-network
     restart: unless-stopped
@@ -93,3 +117,4 @@ networks:
 
 volumes:
   qdrant_data:
+  postgres_data:
