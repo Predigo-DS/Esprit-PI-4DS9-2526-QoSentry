@@ -9,8 +9,8 @@ import { Button } from "../ui/button";
 type SearchSettingsProps = {
   searchType: "hybrid" | "semantic" | "keyword";
   onSearchTypeChange: (type: "hybrid" | "semantic" | "keyword") => void;
-  rrfDenseWeight: number;
-  onRrfDenseWeightChange: (weight: number) => void;
+  rrfSparseWeight: number;
+  onRrfSparseWeightChange: (weight: number) => void;
   minRelevance: number;
   onMinRelevanceChange: (value: number) => void;
 };
@@ -18,8 +18,8 @@ type SearchSettingsProps = {
 export function SearchSettings({
   searchType,
   onSearchTypeChange,
-  rrfDenseWeight,
-  onRrfDenseWeightChange,
+  rrfSparseWeight,
+  onRrfSparseWeightChange,
   minRelevance,
   onMinRelevanceChange,
 }: SearchSettingsProps) {
@@ -109,22 +109,27 @@ export function SearchSettings({
       {advancedOpen && (
         <div className="border-t border-gray-200 pt-2 space-y-3">
           {showWeightSlider && (
-            <div className="flex items-center gap-2">
+            <div className="space-y-1">
+              <div className="flex items-center gap-2">
               <Label htmlFor="rrf-weight" className="text-xs text-gray-600 min-w-[50px]">
-                Keyword
+                Dense
               </Label>
               <Slider
                 id="rrf-weight"
-                value={[rrfDenseWeight]}
-                onValueChange={(values) => onRrfDenseWeightChange(values[0])}
+                value={[rrfSparseWeight]}
+                onValueChange={(values) => onRrfSparseWeightChange(values[0])}
                 min={0}
                 max={1}
                 step={0.1}
                 className="flex-1"
               />
               <Label htmlFor="rrf-weight" className="text-xs text-gray-600 min-w-[50px]">
-                Semantic
+                Sparse
               </Label>
+            </div>
+              <p className="px-1 text-[11px] text-gray-500">
+                Dense {(1 - rrfSparseWeight).toFixed(1)} | Sparse {rrfSparseWeight.toFixed(1)}
+              </p>
             </div>
           )}
           <div className="text-xs text-gray-500 px-1">

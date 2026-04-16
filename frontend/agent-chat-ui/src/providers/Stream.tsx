@@ -15,6 +15,7 @@ import { ArrowRight } from "lucide-react";
 import { useThreads } from "./Thread";
 import { Message } from "@langchain/langgraph-sdk";
 import { UIMessage } from "@langchain/langgraph-sdk/react-ui";
+import { resolveAgentApiUrl } from "@/lib/service-urls";
 
 type ValuesState = {
   messages: Message[];
@@ -141,8 +142,7 @@ export const StreamProvider: React.FC<{ children: ReactNode }> = ({
 
   const finalApiUrl = apiUrl || envApiUrl || DEFAULT_API_URL;
   const finalAssistantId = assistantId || envAssistantId || DEFAULT_ASSISTANT_ID;
-  const agentApiUrl =
-    process.env.NEXT_PUBLIC_AGENT_API_URL || DEFAULT_API_URL;
+  const agentApiUrl = resolveAgentApiUrl(process.env.NEXT_PUBLIC_AGENT_API_URL);
 
   const [messages, setMessages] = useState<Message[]>([]);
   const [isLoading, setIsLoading] = useState(false);

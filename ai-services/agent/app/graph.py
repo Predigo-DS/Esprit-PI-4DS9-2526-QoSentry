@@ -236,6 +236,8 @@ async def generate_node(state: AgentState, config: RunnableConfig) -> AgentState
             "Use the retrieved context below to answer accurately. "
             "If the context is insufficient, say so clearly.\n\n"
             f"Context:\n{state.get('context', 'No context available.')}"
+            "Only answer questions pertaining to QoSentry, Networking, Quality of Experience/Service"
+            "Do not answer generic or vague questions not relevant to the task at hand"
         )
     )
 

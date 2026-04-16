@@ -21,6 +21,17 @@ load_dotenv()
 CHECKPOINT_DB_URI = os.getenv("CHECKPOINT_DB_URI", "").strip()
 
 
+def _read_models_cache_ttl_seconds() -> int:
+    raw = os.getenv("MODEL_CACHE_TTL_SECONDS", "300").strip()
+    try:
+        return max(1, int(raw))
+    except ValueError:
+        return 300
+
+
+MODELS_CACHE_TTL_SECONDS = _read_models_cache_ttl_seconds()
+
+
 class ChatRequest(BaseModel):
     message: str
     messages: list["OpenAIMessage"] | None = None
@@ -321,6 +332,29 @@ async def _fetch_all_models() -> list[dict]:
     ]
 
 
+def _is_models_cache_fresh(app: FastAPI, now: float) -> bool:
+    cached_models = getattr(app.state, "models_cache_data", None)
+    cached_at = getattr(app.state, "models_cache_updated_at", 0.0)
+    return bool(cached_models) and (now - cached_at) < MODELS_CACHE_TTL_SECONDS
+
+
+async def _get_models_with_cache(app: FastAPI) -> list[dict]:
+    now = time.time()
+    if _is_models_cache_fresh(app, now):
+        return app.state.models_cache_data
+
+    lock = app.state.models_cache_lock
+    async with lock:
+        now = time.time()
+        if _is_models_cache_fresh(app, now):
+            return app.state.models_cache_data
+
+        models = await _fetch_all_models()
+        app.state.models_cache_data = models
+        app.state.models_cache_updated_at = now
+        return models
+
+
 async def _get_graph_state(graph, thread_id: str):
     config = {"configurable": {"thread_id": thread_id}}
     aget_state = getattr(graph, "aget_state", None)
@@ -335,6 +369,9 @@ async def lifespan(app: FastAPI):
     app.state.checkpointer_ctx = None
     app.state.persistence_enabled = False
     app.state.graph = build_graph()
+    app.state.models_cache_data = None
+    app.state.models_cache_updated_at = 0.0
+    app.state.models_cache_lock = asyncio.Lock()
 
     if CHECKPOINT_DB_URI:
         checkpointer_ctx = AsyncPostgresSaver.from_conn_string(CHECKPOINT_DB_URI)
@@ -388,13 +425,13 @@ async def get_config():
 
 @app.get("/models")
 async def models():
-    data = await _fetch_all_models()
+    data = await _get_models_with_cache(app)
     return {"object": "list", "data": data}
 
 
 @app.get("/v1/models")
 async def openai_models():
-    data = await _fetch_all_models()
+    data = await _get_models_with_cache(app)
     return {"object": "list", "data": data}
 
 

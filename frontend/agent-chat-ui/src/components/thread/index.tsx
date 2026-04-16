@@ -55,14 +55,8 @@ import {
 } from "./artifact";
 import { useThreads } from "@/providers/Thread";
 import { SearchSettings } from "./search-settings";
-
-type ModelOption = {
-  id: string;
-  provider: string;
-  base_url: string;
-  display_name?: string;
-  description?: string;
-};
+import { resolveAgentApiUrl } from "@/lib/service-urls";
+import { getCachedModels, ModelOption, refreshModels } from "@/lib/model-cache";
 
 type ModelPickerProps = {
   models: ModelOption[];
@@ -447,12 +441,15 @@ export function Thread() {
   const [modelsError, setModelsError] = useState<string | undefined>(undefined);
   const [isCreatingThread, setIsCreatingThread] = useState(false);
   const [searchType, setSearchType] = useState<"hybrid" | "semantic" | "keyword">("hybrid");
-  const [rrfDenseWeight, setRrfDenseWeight] = useState(0.5); // Changed to 50/50 balance
+  const [rrfSparseWeight, setRrfSparseWeight] = useState(0.5);
   const [minRelevance, setMinRelevance] = useState(0.7);
   // Query rewriting always ON - removed toggle
   const isLargeScreen = useMediaQuery("(min-width: 1024px)");
 
-  const agentApiUrl = process.env.NEXT_PUBLIC_AGENT_API_URL || "http://localhost:8002";
+  const agentApiUrl = useMemo(
+    () => resolveAgentApiUrl(process.env.NEXT_PUBLIC_AGENT_API_URL),
+    [],
+  );
 
   const stream = useStreamContext();
   const messages = stream.messages;
@@ -512,78 +509,80 @@ export function Thread() {
   }, [messages]);
 
   const modelsRequestIdRef = useRef(0);
-  const loadModels = useCallback(async () => {
+  const defaultModelWarningShownRef = useRef(false);
+
+  const syncModelSelection = useCallback((availableModels: ModelOption[]) => {
+    if (!availableModels.length) return;
+
+    const defaultModel = availableModels.find(
+      (m: ModelOption) => m.provider === "groq" && m.id === "openai/gpt-oss-120b",
+    );
+    const groqModels = availableModels.filter((m: ModelOption) => m.provider === "groq");
+    const fallbackModel = groqModels[0] || availableModels[0];
+
+    setSelectedModelKey((current) => {
+      if (
+        current &&
+        availableModels.some(
+          (model: ModelOption) => `${model.provider}::${model.id}` === current,
+        )
+      ) {
+        return current;
+      }
+      if (defaultModel) {
+        return `${defaultModel.provider}::${defaultModel.id}`;
+      }
+      return `${fallbackModel.provider}::${fallbackModel.id}`;
+    });
+
+    if (
+      !defaultModel &&
+      groqModels.length > 0 &&
+      !defaultModelWarningShownRef.current
+    ) {
+      defaultModelWarningShownRef.current = true;
+      toast.warning(
+        `Default model "openai/gpt-oss-120b" not available. Using "${fallbackModel.id}" instead.`,
+      );
+    }
+  }, []);
+
+  const loadModels = useCallback(async (forceRefresh = false) => {
     const requestId = modelsRequestIdRef.current + 1;
     modelsRequestIdRef.current = requestId;
 
-    setModelsLoading(true);
+    const cachedModels = !forceRefresh ? getCachedModels() : null;
+    if (cachedModels?.length) {
+      setModels(cachedModels);
+      syncModelSelection(cachedModels);
+      setModelsLoading(false);
+    } else {
+      setModelsLoading(true);
+    }
+
     setModelsError(undefined);
 
     try {
-      const resp = await fetch(`${agentApiUrl}/models`);
-      if (!resp.ok) {
-        throw new Error(`Failed to load models (${resp.status})`);
-      }
-
-      const payload = await resp.json();
-      const data = Array.isArray(payload?.data) ? payload.data : [];
-      const parsed = data
-        .filter((m: any) => typeof m?.id === "string")
-        .map(
-          (m: any) =>
-            ({
-              id: m.id,
-              provider: m.provider ?? "unknown",
-              base_url: m.base_url ?? "",
-              display_name: m.display_name,
-              description: m.description,
-            }) as ModelOption,
-        );
+      const parsed = await refreshModels(agentApiUrl);
 
       if (modelsRequestIdRef.current !== requestId) return;
 
       setModels(parsed);
-      if (!parsed.length) {
-        setModelsError("No models were returned by the backend.");
-        return;
-      }
-
-      const defaultModel = parsed.find(
-        (m: ModelOption) => m.provider === "groq" && m.id === "openai/gpt-oss-120b"
-      );
-      const groqModels = parsed.filter((m: ModelOption) => m.provider === "groq");
-      const fallbackModel = groqModels[0] || parsed[0];
-
-      setSelectedModelKey((current) => {
-        if (
-          current &&
-          parsed.some((model: ModelOption) => `${model.provider}::${model.id}` === current)
-        ) {
-          return current;
-        }
-        if (defaultModel) {
-          return `${defaultModel.provider}::${defaultModel.id}`;
-        }
-        return `${fallbackModel.provider}::${fallbackModel.id}`;
-      });
-
-      if (!defaultModel && groqModels.length > 0) {
-        toast.warning(
-          `Default model "openai/gpt-oss-120b" not available. Using "${fallbackModel.id}" instead.`
-        );
-      }
+      syncModelSelection(parsed);
     } catch {
       if (modelsRequestIdRef.current !== requestId) return;
-      setModelsError("Unable to load models. You can retry.");
+      if (!cachedModels?.length) {
+        setModelsError("Unable to load models. You can retry.");
+      }
     } finally {
-      if (modelsRequestIdRef.current === requestId) {
+      if (modelsRequestIdRef.current === requestId && !cachedModels?.length) {
         setModelsLoading(false);
       }
     }
-  }, [agentApiUrl]);
+  }, [agentApiUrl, syncModelSelection]);
 
   useEffect(() => {
-    loadModels();
+    void loadModels();
     return () => {
       modelsRequestIdRef.current += 1;
     };
@@ -647,7 +646,7 @@ stream.submit(
                 configurable: {
                   ...routingConfig,
                   search_type: searchType,
-                  rrf_dense_weight: rrfDenseWeight,
+                  rrf_dense_weight: Math.max(0, Math.min(1, 1 - rrfSparseWeight)),
                   min_relevance_score: minRelevance,
                   enable_query_rewriting: true, // Always ON
                 },
@@ -951,13 +950,13 @@ footer={
                            onSelect={setSelectedModelKey}
                            isLoading={modelsLoading}
                            error={modelsError}
-                           onRetry={loadModels}
+                             onRetry={() => loadModels(true)}
                          />
 <SearchSettings
                             searchType={searchType}
                             onSearchTypeChange={setSearchType}
-                            rrfDenseWeight={rrfDenseWeight}
-                            onRrfDenseWeightChange={setRrfDenseWeight}
+                              rrfSparseWeight={rrfSparseWeight}
+                              onRrfSparseWeightChange={setRrfSparseWeight}
                             minRelevance={minRelevance}
                             onMinRelevanceChange={setMinRelevance}
                           />

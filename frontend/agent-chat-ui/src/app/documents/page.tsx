@@ -11,6 +11,7 @@ import { Label } from "@/components/ui/label";
 import { Separator } from "@/components/ui/separator";
 import { Toaster } from "@/components/ui/sonner";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { DEFAULT_RAG_API_URL, resolveRagApiUrl } from "@/lib/service-urls";
 
 type RagDocument = {
   document_id: string;
@@ -28,20 +29,6 @@ type RetrieveChunk = {
 type SearchType = "hybrid" | "semantic" | "keyword";
 
 const ACCEPTED_EXTENSIONS = [".pdf", ".txt", ".md"];
-
-const DEFAULT_RAG_API_URL = "http://localhost:8001";
-
-function resolveRagApiUrl(raw: string | undefined): string {
-  const candidate = (raw || "").trim();
-  if (!candidate) return DEFAULT_RAG_API_URL;
-
-  try {
-    const parsed = new URL(candidate);
-    return parsed.origin;
-  } catch {
-    return DEFAULT_RAG_API_URL;
-  }
-}
 
 async function readErrorMessage(response: Response): Promise<string> {
   const text = await response.text();
@@ -80,7 +67,7 @@ export default function DocumentsPage(): React.ReactNode {
   const [query, setQuery] = useState("");
   const [topK, setTopK] = useState("5");
   const [searchType, setSearchType] = useState<SearchType>("hybrid");
-  const [rrfDenseWeight, setRrfDenseWeight] = useState("0.7");
+  const [rrfSparseWeight, setRrfSparseWeight] = useState("0.3");
   const [retrieveLoading, setRetrieveLoading] = useState(false);
   const [retrieveResults, setRetrieveResults] = useState<RetrieveChunk[]>([]);
   const [expandedChunks, setExpandedChunks] = useState<Set<number>>(new Set());
@@ -101,6 +88,9 @@ export default function DocumentsPage(): React.ReactNode {
     () => [...documents].sort((a, b) => (b.last_updated || "").localeCompare(a.last_updated || "")),
     [documents],
   );
+
+  const sparseWeight = Math.max(0, Math.min(1, Number.parseFloat(rrfSparseWeight) || 0));
+  const denseWeight = Math.max(0, Math.min(1, 1 - sparseWeight));
 
   const loadDocuments = useCallback(async () => {
     setDocumentsLoading(true);
@@ -257,7 +247,7 @@ export default function DocumentsPage(): React.ReactNode {
           query: query.trim(),
           top_k: Math.max(1, Number(topK) || 5),
           search_type: searchType,
-          rrf_dense_weight: searchType === "hybrid" ? parseFloat(rrfDenseWeight) : undefined,
+          rrf_dense_weight: searchType === "hybrid" ? denseWeight : undefined,
           data_category: filterDataCategory || undefined,
           tenant_id: filterTenantId || undefined,
         }),
@@ -295,7 +285,7 @@ export default function DocumentsPage(): React.ReactNode {
             query: query.trim(),
             top_k: Math.max(1, Number(topK) || 5),
             search_type: "hybrid",
-            rrf_dense_weight: parseFloat(rrfDenseWeight),
+            rrf_dense_weight: denseWeight,
           }),
         }),
         fetch(`${ragApiUrl}/retrieve`, {
@@ -533,16 +523,16 @@ export default function DocumentsPage(): React.ReactNode {
                   <div className="flex items-center gap-3">
                     <div className="flex-1">
                       <div className="flex justify-between text-xs">
-                        <span>Dense: {parseFloat(rrfDenseWeight).toFixed(2)}</span>
-                        <span>Sparse: {(1 - parseFloat(rrfDenseWeight)).toFixed(2)}</span>
+                        <span>Dense: {denseWeight.toFixed(2)}</span>
+                        <span>Sparse: {sparseWeight.toFixed(2)}</span>
                       </div>
                       <input
                         type="range"
                         min="0"
                         max="1"
                         step="0.1"
-                        value={rrfDenseWeight}
-                        onChange={(e) => setRrfDenseWeight(e.target.value)}
+                        value={rrfSparseWeight}
+                        onChange={(e) => setRrfSparseWeight(e.target.value)}
                         className="mt-2 w-full"
                       />
                     </div>

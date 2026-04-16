@@ -8,6 +8,7 @@ import {
   Dispatch,
   SetStateAction,
 } from "react";
+import { resolveAgentApiUrl } from "@/lib/service-urls";
 
 interface ThreadContextType {
   getThreads: () => Promise<Thread[]>;
@@ -23,7 +24,7 @@ const ThreadContext = createContext<ThreadContextType | undefined>(undefined);
 export function ThreadProvider({ children }: { children: ReactNode }) {
   const [threads, setThreads] = useState<Thread[]>([]);
   const [threadsLoading, setThreadsLoading] = useState(false);
-  const agentApiUrl = process.env.NEXT_PUBLIC_AGENT_API_URL || "http://localhost:8002";
+  const agentApiUrl = resolveAgentApiUrl(process.env.NEXT_PUBLIC_AGENT_API_URL);
 
   const getThreads = async (): Promise<Thread[]> => {
     try {
