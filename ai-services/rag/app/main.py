@@ -50,8 +50,28 @@ async def _run_warmup():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     print("Loading AI models and connecting to DB...")
+    max_retries = int(os.getenv("QDRANT_INIT_MAX_RETRIES", "30"))
+    retry_delay = float(os.getenv("QDRANT_INIT_RETRY_DELAY_SEC", "2"))
     models["embedder"] = get_embedder()
-    models["vs"] = VectorStoreClient(embedder=models["embedder"])
+    last_error: Exception | None = None
+    for attempt in range(1, max_retries + 1):
+        try:
+            models["vs"] = VectorStoreClient(embedder=models["embedder"])
+            last_error = None
+            break
+        except Exception as e:
+            last_error = e
+            if attempt == max_retries:
+                raise
+            print(
+                f"Qdrant not ready yet (attempt {attempt}/{max_retries}): {e}. "
+                f"Retrying in {retry_delay}s..."
+            )
+            await asyncio.sleep(retry_delay)
+
+    if last_error is not None:
+        raise last_error
+
     warmup_state["status"] = "idle"
     warmup_state["last_error"] = None
     asyncio.create_task(_run_warmup())

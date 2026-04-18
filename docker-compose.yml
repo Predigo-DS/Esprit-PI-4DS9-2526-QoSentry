@@ -38,15 +38,12 @@ services:
       - qdrant_data:/qdrant/storage
     networks:
       - qos-network
-    entrypoint: >
-      sh -c "apt-get update -qq && apt-get install -y -qq curl &&
-      exec /qdrant/qdrant"
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:6333/readyz"]
+      test: ["CMD", "/qdrant/qdrant", "--help"]
       interval: 10s
       timeout: 5s
       retries: 5
-      start_period : 90s
+      start_period : 30s
 
   # ─────────────────────────────────────────
   # RAG SERVICE  (ingestion + retrieval)
