@@ -1,5 +1,3 @@
-version: "3.9"
-
 services:
 
   # ─────────────────────────────────────────
@@ -178,6 +176,7 @@ services:
       APP_JWT_EXPIRATION_MS: 86400000
       AI_ANOMALY_BASE_URL: http://anomaly_detection:8003
       AI_SLA_BASE_URL: http://sla_forecasting:8004
+      AI_AGENT_BASE_URL: http://agent:8002
     depends_on:
       postgres:
         condition: service_healthy
@@ -186,6 +185,8 @@ services:
       anomaly_detection:
         condition: service_healthy
       sla_forecasting:
+        condition: service_healthy
+      agent:
         condition: service_healthy
     networks:
       - qos-network
