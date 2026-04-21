@@ -61,7 +61,8 @@ public class AiInferenceServiceImpl implements AiInferenceService {
     public OptimizationResponseDto runMockOptimization() {
         List<Map<String, Object>> rows = buildMockTelemetryRows();
 
-        // Step 1: anomaly detection — strip string fields, service only accepts numeric values
+        // Step 1: anomaly detection — strip string fields, service only accepts numeric
+        // values
         AnomalyInferenceRequestDto anomalyReq = AnomalyInferenceRequestDto.builder()
                 .rows(buildNumericOnlyRows(rows))
                 .stride(1)
@@ -69,8 +70,7 @@ public class AiInferenceServiceImpl implements AiInferenceService {
                 .build();
         JsonNode anomalyResult = callWithMockFallback(
                 () -> predictAnomaly(anomalyReq),
-                buildMockAnomalyResult()
-        );
+                buildMockAnomalyResult());
 
         // Step 2: SLA forecasting
         SlaInferenceRequestDto slaReq = SlaInferenceRequestDto.builder()
@@ -83,8 +83,7 @@ public class AiInferenceServiceImpl implements AiInferenceService {
                 .build();
         JsonNode slaResult = callWithMockFallback(
                 () -> predictSla(slaReq),
-                buildMockSlaResult()
-        );
+                buildMockSlaResult());
 
         // Step 3: compute averages over last 30 seconds
         Map<String, Double> avg30s = computeAverages(rows);
@@ -98,9 +97,8 @@ public class AiInferenceServiceImpl implements AiInferenceService {
                 .context("mock optimization pipeline")
                 .build();
         JsonNode agentResult = callWithMockFallback(
-            () -> post(agentBaseUrl + "/optimization/respond", agentReq),
-            buildMockAgentResult()
-        );
+                () -> post(agentBaseUrl + "/optimization/respond", agentReq),
+                buildMockAgentResult());
 
         Map<String, Object> telemetrySummary = new HashMap<>();
         telemetrySummary.put("row_count", rows.size());
@@ -132,31 +130,31 @@ public class AiInferenceServiceImpl implements AiInferenceService {
             row.put("segment", "IMS_CDN");
             row.put("switch_id", "sw-0" + (i % 3 + 1));
             row.put("port_no", i % 6 + 1);
-            row.put("mos_voice",             lerp(3.9, 2.5, t));
-            row.put("e2e_delay_ms",          lerp(40.0, 160.0, t));
-            row.put("plr",                   lerp(0.005, 0.15, t));
-            row.put("jitter_ms",             lerp(3.0, 40.0, t));
-            row.put("cdr_flag",              t > 0.8 ? 1 : 0);
-            row.put("call_setup_time_ms",    lerp(180.0, 320.0, t));
-            row.put("buffering_ratio",       lerp(0.01, 0.30, t));
-            row.put("rebuffering_freq",      lerp(0.0, 2.0, t));
-            row.put("rebuffering_count",     (int) lerp(0, 7, t));
-            row.put("total_stall_seconds",   lerp(0.0, 2.5, t));
-            row.put("video_start_time_ms",   lerp(480.0, 800.0, t));
-            row.put("streaming_mos",         lerp(4.0, 2.8, t));
-            row.put("effective_bitrate_mbps",lerp(12.0, 5.5, t));
-            row.put("throughput_mbps",       lerp(11.0, 5.0, t));
-            row.put("dns_latency_ms",        lerp(10.0, 38.0, t));
-            row.put("availability",          lerp(99.99, 97.5, t));
-            row.put("rx_bytes",   (long) lerp(1100000, 1600000, t));
-            row.put("tx_bytes",   (long) lerp(750000,  1000000, t));
-            row.put("rx_packets", (long) lerp(8500,    10500,   t));
-            row.put("tx_packets", (long) lerp(6500,    8500,    t));
-            row.put("rx_dropped", (int)  lerp(2,       55,      t));
-            row.put("tx_dropped", (int)  lerp(1,       35,      t));
-            row.put("dataplane_latency_ms",  lerp(1.5, 18.0, t));
-            row.put("ctrl_plane_rtt_ms",     lerp(3.0, 22.0, t));
-            row.put("flow_count", (int)      lerp(100, 180,  t));
+            row.put("mos_voice", lerp(3.9, 2.5, t));
+            row.put("e2e_delay_ms", lerp(40.0, 160.0, t));
+            row.put("plr", lerp(0.005, 0.15, t));
+            row.put("jitter_ms", lerp(3.0, 40.0, t));
+            row.put("cdr_flag", t > 0.8 ? 1 : 0);
+            row.put("call_setup_time_ms", lerp(180.0, 320.0, t));
+            row.put("buffering_ratio", lerp(0.01, 0.30, t));
+            row.put("rebuffering_freq", lerp(0.0, 2.0, t));
+            row.put("rebuffering_count", (int) lerp(0, 7, t));
+            row.put("total_stall_seconds", lerp(0.0, 2.5, t));
+            row.put("video_start_time_ms", lerp(480.0, 800.0, t));
+            row.put("streaming_mos", lerp(4.0, 2.8, t));
+            row.put("effective_bitrate_mbps", lerp(12.0, 5.5, t));
+            row.put("throughput_mbps", lerp(11.0, 5.0, t));
+            row.put("dns_latency_ms", lerp(10.0, 38.0, t));
+            row.put("availability", lerp(99.99, 97.5, t));
+            row.put("rx_bytes", (long) lerp(1100000, 1600000, t));
+            row.put("tx_bytes", (long) lerp(750000, 1000000, t));
+            row.put("rx_packets", (long) lerp(8500, 10500, t));
+            row.put("tx_packets", (long) lerp(6500, 8500, t));
+            row.put("rx_dropped", (int) lerp(2, 55, t));
+            row.put("tx_dropped", (int) lerp(1, 35, t));
+            row.put("dataplane_latency_ms", lerp(1.5, 18.0, t));
+            row.put("ctrl_plane_rtt_ms", lerp(3.0, 22.0, t));
+            row.put("flow_count", (int) lerp(100, 180, t));
             row.put("mos_source", "mock");
             row.put("label", t > 0.7 ? 1 : 0);
             rows.add(row);
@@ -238,11 +236,11 @@ public class AiInferenceServiceImpl implements AiInferenceService {
 
     private Map<String, Double> computeAverages(List<Map<String, Object>> rows) {
         String[] numericFields = {
-            "mos_voice", "e2e_delay_ms", "plr", "jitter_ms", "call_setup_time_ms",
-            "buffering_ratio", "rebuffering_freq", "rebuffering_count", "total_stall_seconds",
-            "video_start_time_ms", "streaming_mos", "effective_bitrate_mbps", "throughput_mbps",
-            "dns_latency_ms", "availability", "rx_bytes", "tx_bytes", "rx_packets", "tx_packets",
-            "rx_dropped", "tx_dropped", "dataplane_latency_ms", "ctrl_plane_rtt_ms", "flow_count"
+                "mos_voice", "e2e_delay_ms", "plr", "jitter_ms", "call_setup_time_ms",
+                "buffering_ratio", "rebuffering_freq", "rebuffering_count", "total_stall_seconds",
+                "video_start_time_ms", "streaming_mos", "effective_bitrate_mbps", "throughput_mbps",
+                "dns_latency_ms", "availability", "rx_bytes", "tx_bytes", "rx_packets", "tx_packets",
+                "rx_dropped", "tx_dropped", "dataplane_latency_ms", "ctrl_plane_rtt_ms", "flow_count"
         };
 
         Map<String, Double> sums = new HashMap<>();
