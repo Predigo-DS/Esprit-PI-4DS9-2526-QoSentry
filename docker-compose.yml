@@ -97,6 +97,9 @@ services:
     environment:
       - RAG_SERVICE_URL=http://rag:8001
       - CHECKPOINT_DB_URI=postgresql://postgres:postgres@postgres:5432/qosbuddy
+      - GROQ_API_KEY=${GROQ_API_KEY:-}
+      - LOCAL_OPENAI_API_KEY=${LOCAL_OPENAI_API_KEY:-}
+      - TOKEN_FACTORY_API_KEY=${TOKEN_FACTORY_API_KEY:-}
     volumes:
       - ./ai-services/agent/app:/app
       - ./config:/app/config:ro
