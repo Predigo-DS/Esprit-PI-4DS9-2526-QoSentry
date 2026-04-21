@@ -48,8 +48,10 @@ class QoSRetriever(BaseRetriever):
     rag_url: str = RAG_URL
     top_k: int = 10
     search_type: str = "hybrid"
-    rrf_dense_weight: float = 0.7
-    min_score: float = 0.5
+    rrf_dense_weight: float = 0.8
+    min_score: float = 0.4
+    enable_reranking: bool = True
+    rerank_top_n: int = 50
 
     def _get_relevant_documents(
         self, query: str, *, run_manager: CallbackManagerForRetrieverRun
@@ -63,6 +65,8 @@ class QoSRetriever(BaseRetriever):
                     "search_type": self.search_type,
                     "rrf_dense_weight": self.rrf_dense_weight,
                     "min_relevance_score": self.min_score,
+                    "rerank": self.enable_reranking,
+                    "rerank_top_n": self.rerank_top_n,
                 },
                 timeout=30.0,
             )
@@ -73,7 +77,9 @@ class QoSRetriever(BaseRetriever):
                 page_content=c["text"],
                 metadata={
                     **c.get("metadata", {}),
-                    "score": c.get("score", 0.7),  # Include score in metadata
+                    "score": c.get("score", 0.7),
+                    "rerank_score": c.get("rerank_score"),
+                    "is_reranked": c.get("is_reranked", False),
                 },
             )
             for c in data.get("chunks", [])
@@ -91,6 +97,8 @@ class QoSRetriever(BaseRetriever):
                     "search_type": self.search_type,
                     "rrf_dense_weight": self.rrf_dense_weight,
                     "min_relevance_score": self.min_score,
+                    "rerank": self.enable_reranking,
+                    "rerank_top_n": self.rerank_top_n,
                 },
                 timeout=30.0,
             )
@@ -101,7 +109,9 @@ class QoSRetriever(BaseRetriever):
                 page_content=c["text"],
                 metadata={
                     **c.get("metadata", {}),
-                    "score": c.get("score", 0.7),  # Include score in metadata
+                    "score": c.get("score", 0.7),
+                    "rerank_score": c.get("rerank_score"),
+                    "is_reranked": c.get("is_reranked", False),
                 },
             )
             for c in data.get("chunks", [])
@@ -161,8 +171,10 @@ async def retrieve_node(state: AgentState, config: RunnableConfig) -> AgentState
     cfg = (config or {}).get("configurable", {}) if config else {}
     search_type = cfg.get("search_type", "hybrid")
     rrf_dense_weight = cfg.get("rrf_dense_weight", 0.7)
-    min_relevance = cfg.get("min_relevance_score", 0.7)
+    min_relevance = cfg.get("min_relevance_score", 0.4)
     enable_rewriting = cfg.get("enable_query_rewriting", True)
+    enable_reranking = cfg.get("enable_reranking", True)
+    rerank_top_n = cfg.get("rerank_top_n", 50)
 
     # Query rewriting (if enabled)
     queries = [query]
@@ -186,6 +198,8 @@ async def retrieve_node(state: AgentState, config: RunnableConfig) -> AgentState
         search_type=search_type,
         rrf_dense_weight=rrf_dense_weight,
         min_score=min_relevance,
+        enable_reranking=enable_reranking,
+        rerank_top_n=rerank_top_n,
     )
 
     # Retrieve for each query (parallel if multiple)
@@ -210,6 +224,8 @@ async def retrieve_node(state: AgentState, config: RunnableConfig) -> AgentState
             "text": doc.page_content,
             "metadata": doc.metadata,
             "score": doc.metadata.get("score", 0.7),
+            "rerank_score": doc.metadata.get("rerank_score"),
+            "is_reranked": doc.metadata.get("is_reranked", False),
         }
         for doc in ranked_docs
     ]
@@ -242,7 +258,18 @@ async def generate_node(state: AgentState, config: RunnableConfig) -> AgentState
     )
 
     response = await llm.ainvoke([system] + list(state["messages"]))
-    return {"messages": [AIMessage(content=response.content)]}
+    sources = state.get("sources", [])
+    search_type = state.get("search_type")
+    rewritten_queries = state.get("rewritten_queries")
+
+    ai_message = AIMessage(content=response.content)
+    if sources:
+        ai_message.additional_kwargs["metadata"] = {
+            "sources": sources,
+            "search_type": search_type,
+            "rewritten_queries": rewritten_queries,
+        }
+    return {"messages": [ai_message]}
 
 
 # ── Graph definition ──────────────────────────────────────────────────────────

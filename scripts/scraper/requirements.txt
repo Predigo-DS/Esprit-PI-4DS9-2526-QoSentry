@@ -1,0 +1,11 @@
+requests>=2.31.0
+beautifulsoup4>=4.12.0
+trafilatura>=1.6.0
+urllib3>=2.0.0
+crawl4ai>=0.3.0
+datasketch>=1.6.4
+pydantic>=2.0.0
+langchain-openai>=0.1.0
+langchain-core>=0.2.0
+langgraph>=0.2.0
+tqdm>=4.66.0

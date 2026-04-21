@@ -409,8 +409,9 @@ export function Thread() {
   const [modelsError, setModelsError] = useState<string | undefined>(undefined);
   const [isCreatingThread, setIsCreatingThread] = useState(false);
   const [searchType, setSearchType] = useState<"hybrid" | "semantic" | "keyword">("hybrid");
-  const [rrfSparseWeight, setRrfSparseWeight] = useState(0.5);
-  const [minRelevance, setMinRelevance] = useState(0.5);
+  const [rrfSparseWeight, setRrfSparseWeight] = useState(0.2);
+  const [minRelevance, setMinRelevance] = useState(0.4);
+  const [enableReranking, setEnableReranking] = useState(true);
   // Query rewriting always ON - removed toggle
   const isLargeScreen = useMediaQuery("(min-width: 1024px)");
 
@@ -617,6 +618,7 @@ stream.submit(
                   rrf_dense_weight: Math.max(0, Math.min(1, 1 - rrfSparseWeight)),
                   min_relevance_score: minRelevance,
                   enable_query_rewriting: true, // Always ON
+                  enable_reranking: enableReranking,
                 },
               }
             : undefined,
@@ -893,13 +895,15 @@ footer={
                              onRetry={() => loadModels(true)}
                          />
 <SearchSettings
-                            searchType={searchType}
-                            onSearchTypeChange={setSearchType}
-                              rrfSparseWeight={rrfSparseWeight}
-                              onRrfSparseWeightChange={setRrfSparseWeight}
-                            minRelevance={minRelevance}
-                            onMinRelevanceChange={setMinRelevance}
-                          />
+                             searchType={searchType}
+                             onSearchTypeChange={setSearchType}
+                               rrfSparseWeight={rrfSparseWeight}
+                               onRrfSparseWeightChange={setRrfSparseWeight}
+                             minRelevance={minRelevance}
+                             onMinRelevanceChange={setMinRelevance}
+                             enableReranking={enableReranking}
+                             onRerankingChange={setEnableReranking}
+                           />
 <Label
                            htmlFor="file-input"
                            className="inline-flex h-9 cursor-pointer items-center gap-2 rounded-lg border border-border bg-background/70 px-3 text-xs font-medium text-muted transition-colors hover:text-text-main"

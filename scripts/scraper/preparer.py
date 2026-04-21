@@ -18,12 +18,18 @@ import logging
 import os
 import re
 import hashlib
+import time
+import threading
+import sys
 from datetime import datetime, timezone
 from typing import List, Dict, Optional, Any, Literal
 from enum import Enum
 
+from tqdm import tqdm
 from pydantic import BaseModel, Field
 from typing_extensions import TypedDict
+
+from datasketch import MinHash, MinHashLSH
 
 # LangChain imports
 from langchain_openai import ChatOpenAI
@@ -32,13 +38,123 @@ from langchain_core.prompts import ChatPromptTemplate
 # LangGraph imports
 from langgraph.graph import StateGraph, START, END
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    handlers=[logging.StreamHandler()]
-)
+# Configure logging — file by default, console only with --verbose
+LOG_FILE = "preparer.log"
+
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.DEBUG)
+
+# File handler — always active
+_file_handler = logging.FileHandler(LOG_FILE, encoding="utf-8")
+_file_handler.setLevel(logging.DEBUG)
+_file_fmt = logging.Formatter(
+    "%(asctime)s [%(levelname)s] %(name)s - %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+_file_handler.setFormatter(_file_fmt)
+logger.addHandler(_file_handler)
+
+# Console handler — only for --verbose (INFO level)
+_console_handler = logging.StreamHandler(sys.stdout)
+_console_handler.setLevel(logging.INFO)
+_console_fmt = logging.Formatter("[%(levelname)s] %(message)s")
+_console_handler.setFormatter(_console_fmt)
+logger.addHandler(_console_handler)
+
+
+class ProgressTracker:
+    """Thread-safe progress tracker for concurrent document processing."""
+    
+    def __init__(self, total: int, desc: str = "Processing"):
+        self.total = total
+        self.desc = desc
+        self.lock = threading.Lock()
+        self.done = 0
+        self.kept = 0
+        self.failed = 0
+        self.skipped = 0
+        self.start_time = time.perf_counter()
+        self.node_times: Dict[str, float] = {}
+        self.node_start: Optional[float] = None
+        
+    def set_node_start(self, node_name: str):
+        with self.lock:
+            self.node_start = time.perf_counter()
+            self.node_times[node_name] = 0  # placeholder
+        
+    def record_complete(self, status: str = "kept"):
+        with self.lock:
+            self.done += 1
+            if status == "kept":
+                self.kept += 1
+            elif status == "failed":
+                self.failed += 1
+            elif status == "skipped":
+                self.skipped += 1
+    
+    def record_node_end(self, node_name: str):
+        with self.lock:
+            if self.node_start is not None:
+                self.node_times[node_name] = time.perf_counter() - self.node_start
+                self.node_start = None
+    
+    def get_eta(self) -> str:
+        with self.lock:
+            elapsed = time.perf_counter() - self.start_time
+            if self.done == 0:
+                return "--:--"
+            remaining = self.total - self.done
+            rate = self.done / elapsed if elapsed > 0 else 0
+            eta_secs = remaining / rate if rate > 0 else 0
+            return self._format_secs(eta_secs)
+    
+    def get_elapsed(self) -> str:
+        elapsed = time.perf_counter() - self.start_time
+        return self._format_secs(elapsed)
+    
+    def get_total_time(self) -> str:
+        with self.lock:
+            elapsed = time.perf_counter() - self.start_time
+            return self._format_secs(elapsed)
+    
+    @staticmethod
+    def _format_secs(secs: float) -> str:
+        if secs < 60:
+            return f"{secs:.0f}s"
+        mins = int(secs // 60)
+        secs = secs % 60
+        return f"{mins:02d}:{secs:05.2f}"
+    
+    def bar(self) -> tqdm:
+        return tqdm(
+            total=self.total,
+            desc=self.desc,
+            file=sys.stdout,
+            leave=True,
+            bar_format="{l_bar}{bar:30}{r_bar}",
+            dynamic_ncols=True,
+        )
+    
+    def update(self, pbar: tqdm, status: str = "kept"):
+        with self.lock:
+            self.done += 1
+            if status == "kept":
+                self.kept += 1
+            elif status == "failed":
+                self.failed += 1
+            elif status == "skipped":
+                self.skipped += 1
+        
+        elapsed = self.get_elapsed()
+        eta = self.get_eta()
+        kept = self.kept
+        failed = self.failed
+        skipped = self.skipped
+        
+        pbar.update(1)
+        pbar.set_postfix_str(
+            f"✅{kept} ❌{failed} ⏭️{skipped} | {elapsed} elapsed | ETA {eta}"
+        )
 
 
 # ──────────────────────────────────────────────────────────
@@ -56,9 +172,10 @@ class PipelineConfig:
     # Processing Settings
     MIN_QUALITY_SCORE: int = 4
     MAX_CONCURRENT_LLM_CALLS: int = 5
-    LLM_REQUEST_TIMEOUT: int = 60
+    LLM_REQUEST_TIMEOUT: int = 120
     LLM_RETRY_ATTEMPTS: int = 3
     MAX_TEXT_LENGTH: int = 6000  # Truncate text for LLM to avoid token limits
+    NEAR_DUPLICATE_THRESHOLD: float = 0.85
     
     # Output Settings
     OUTPUT_FILE: str = "network_docs_prepared.json"
@@ -153,6 +270,10 @@ class MetadataExtraction(BaseModel):
         default=None,
         description="For troubleshooting: brief summary of the problem being solved"
     )
+    context_summary: Optional[str] = Field(
+        default=None,
+        description="1-2 sentence summary of the document's topic and scope for retrieval context"
+    )
     code_block: Optional[str] = Field(
         default=None,
         description="Extract the primary code/config block if present, verbatim"
@@ -173,6 +294,7 @@ class PipelineState(TypedDict):
     failed_docs: List[Dict[str, Any]]
     stats: Dict[str, Any]
     config: Dict[str, Any]
+    _node_times: Dict[str, float]
 
 
 # ──────────────────────────────────────────────────────────
@@ -238,10 +360,62 @@ def create_llm(
         api_key=api_key or PipelineConfig.OPENAI_API_KEY,
         base_url=base_url or PipelineConfig.OPENAI_BASE_URL,
         model=model or PipelineConfig.LLM_MODEL,
-        #temperature=temperature or PipelineConfig.LLM_TEMPERATURE,
+        temperature=temperature or PipelineConfig.LLM_TEMPERATURE,
         timeout=timeout or PipelineConfig.LLM_REQUEST_TIMEOUT,
         max_retries=PipelineConfig.LLM_RETRY_ATTEMPTS,
     )
+
+
+# ──────────────────────────────────────────────────────────
+# PHASE 0: Q&A PAIR SPLITTING
+# ──────────────────────────────────────────────────────────
+def split_qa_pairs(doc: Dict[str, Any]) -> list[Dict[str, Any]]:
+    """Split a StackExchange Q&A thread into individual Q&A pair documents.
+
+    Each answer becomes a separate document paired with its question.
+    Questions with no answers or only low-quality answers are filtered out.
+    """
+    metadata = doc.get("metadata", {})
+    
+    if metadata.get("source_type") != "stackexchange_qa":
+        return [doc]
+    
+    text = doc.get("text", "")
+    if "### Top Answers:" not in text:
+        return []
+    
+    qa_parts = text.split("### Top Answers:", 1)
+    question = qa_parts[0].replace("Q: ", "").strip()
+    answers_text = qa_parts[1]
+    
+    answer_blocks = re.split(r'\n\n---\n\n', answers_text)
+    
+    result = []
+    for block in answer_blocks:
+        block = block.strip()
+        if not block:
+            continue
+        
+        score_match = re.search(r'\[Score:(-?\d+)\]', block)
+        score = int(score_match.group(1)) if score_match else 0
+        
+        answer_text = re.sub(r'^[#✓\d]+\s*\[Score:\d+\]\s*', '', block)
+        
+        if not answer_text.strip():
+            continue
+        
+        qa_text = f"Q: {question}\n\n[Score:{score}] {answer_text}"
+        qa_doc = {
+            "text": qa_text,
+            "metadata": metadata.copy(),
+        }
+        qa_doc["metadata"]["content_hash"] = hashlib.sha256(qa_text.encode()).hexdigest()[:8]
+        qa_doc["metadata"]["se_answer_score"] = score
+        qa_doc["metadata"]["qa_pair_index"] = len(result)
+        
+        result.append(qa_doc)
+    
+    return result if result else []
 
 
 # ──────────────────────────────────────────────────────────
@@ -259,24 +433,27 @@ def validate_document_integrity(doc: Dict[str, Any]) -> tuple[bool, str]:
     if not text or len(text.strip()) < 50:
         return False, "Text too short (< 50 chars)"
     
-    # For StackExchange Q&A: verify answer content is present
+    # For StackExchange Q&A: strict filtering
     if metadata.get("source_type") == "stackexchange_qa":
-        is_answered = metadata.get("se_is_answered", False)
         answer_count = metadata.get("se_answer_count", 0)
         
-        # Check for answer indicators in text
+        # Check for answer indicators in text (works for both raw threads and split Q&A pairs)
         answer_indicators = [
             "### Top Answers:", "✓", "#1 [Score:", "#2 [Score:", "#3 [Score:",
             "Accepted Answer", "Best Answer", "---\n\n",
-            "Answer:", "answer is", "solution is", "you should"
+            "Answer:", "answer is", "solution is", "you should", "[Score:"
         ]
         has_answer = any(indicator in text for indicator in answer_indicators)
         
-        # Flag if marked as answered but no answer text found
-        if is_answered and not has_answer and answer_count == 0:
-            return False, "StackExchange Q&A marked answered but no answer text found"
+        # Skip if no answers at all
+        if answer_count == 0:
+            return False, "StackExchange Q&A with no answers"
         
-        # Flag if appears to be question-only with minimal content
+        # Skip if no answer content found in text
+        if not has_answer:
+            return False, "StackExchange Q&A with no answer content"
+        
+        # Skip question-only docs with minimal content
         question_starters = ["How do I", "How to", "Why does", "What is", "Is it possible", "Can I"]
         starts_with_question = any(text.strip().startswith(q) for q in question_starters)
         
@@ -296,6 +473,35 @@ def validate_document_integrity(doc: Dict[str, Any]) -> tuple[bool, str]:
             return False, f"Spam/unwanted pattern detected: {pattern[:50]}"
     
     return True, "Valid"
+
+
+def find_near_duplicate_indices(docs: List[Dict], threshold: float = 0.85) -> set:
+    """Find indices of near-duplicate documents using MinHash LSH."""
+    lsh = MinHashLSH(threshold=threshold, num_perm=128)
+    
+    # Build MinHash for each doc and insert into LSH index
+    for i, doc in enumerate(docs):
+        m = MinHash(num_perm=128)
+        for word in doc.get("text", "").split():
+            m.update(word.encode())
+        lsh.insert(f"doc_{i}", m)
+    
+    # Query each doc against the index to find neighbors
+    duplicates = set()
+    for i in range(len(docs)):
+        m = MinHash(num_perm=128)
+        for word in docs[i].get("text", "").split():
+            m.update(word.encode())
+        neighbors = lsh.query(m)
+        for neighbor_key in neighbors:
+            try:
+                neighbor_idx = int(neighbor_key.split("_")[1])
+                if neighbor_idx != i:
+                    duplicates.add(neighbor_idx)
+            except (ValueError, IndexError):
+                continue
+    
+    return duplicates
 
 
 def normalize_metadata(doc: Dict[str, Any]) -> Dict[str, Any]:
@@ -434,14 +640,14 @@ async def process_single_document(
     doc_title = doc.get("metadata", {}).get("title", "Unknown")
     doc_hash = doc.get("metadata", {}).get("content_hash", f"doc_{doc_idx}")
     
-    logger.info(f"📝 [{doc_idx}] Processing: {doc_title[:55]}...")
+    logger.debug(f"📝 [{doc_idx}] Processing: {doc_title[:55]}...")
     
     # ══════════════════════════════════════════════════════
     # PHASE 1: VALIDATION
     # ══════════════════════════════════════════════════════
     passed, reason = validate_document_integrity(doc)
     if not passed:
-        logger.warning(f"  ❌ Validation failed: {reason}")
+        logger.debug(f"  ❌ Validation failed: {reason}")
         failed = {
             "original_doc": doc,
             "processing_error": f"VALIDATION: {reason}",
@@ -480,7 +686,7 @@ async def process_single_document(
         }
         return None, failed
     
-    logger.info(
+    logger.debug(
         f"  📊 Quality: {quality.quality_score}/10 | "
         f"Action: {quality.action.value} | "
         f"{quality.reason[:50]}..."
@@ -525,11 +731,33 @@ async def process_single_document(
             has_syntax_errors=False
         )
     
-    logger.info(
+    logger.debug(
         f"  🏷️ Type: {meta_extract.content_type} | "
         f"Vendor: {meta_extract.vendor or 'N/A'} | "
         f"Tech: {', '.join(meta_extract.technology[:3]) or 'N/A'}"
     )
+    
+    # Generate context summary if not already present
+    if not meta_extract.context_summary:
+        doc_title = doc.get("metadata", {}).get("title", "Unknown")
+        summary_prompt = f"""Summarize this document's topic and scope in exactly 1-2 sentences for retrieval context.
+Title: {doc_title}
+Content type: {meta_extract.content_type}
+Tags: {', '.join(meta_extract.technology[:5])}
+
+Return only the summary text, nothing else."""
+        try:
+            summary_chain = (
+                ChatPromptTemplate.from_messages([
+                    ("system", "You are a technical documentation assistant. Provide concise summaries."),
+                    ("human", summary_prompt)
+                ])
+                | llm
+            )
+            summary_result = await summary_chain.ainvoke({"input": ""})
+            meta_extract.context_summary = summary_result.content.strip()
+        except Exception:
+            meta_extract.context_summary = f"Document about {meta_extract.content_type} content"
     
     # ══════════════════════════════════════════════════════
     # BUILD FINAL DOCUMENT
@@ -550,6 +778,7 @@ async def process_single_document(
         "vendor": meta_extract.vendor,
         "technology": meta_extract.technology,
         "problem_summary": meta_extract.problem_summary,
+        "context_summary": meta_extract.context_summary,
         "has_syntax_errors": meta_extract.has_syntax_errors,
         "status": "needs_review" if quality.action == QualityAction.ENRICH else "verified",
     })
@@ -581,7 +810,7 @@ async def process_single_document(
     if normalized_doc.get("code_snippets"):
         final_doc["code_snippets"] = normalized_doc["code_snippets"]
     
-    logger.info(f"  ✅ Finalized: status={final_metadata['status']}")
+    logger.debug(f"  ✅ Finalized: status={final_metadata['status']}")
     return final_doc, None
 
 
@@ -611,10 +840,13 @@ def build_pipeline_graph(config: Dict[str, Any]) -> StateGraph:
             state["documents"] = []
             return state
         
+        file_size = os.path.getsize(input_file)
+        size_str = f"{file_size / (1024*1024):.1f} MB" if file_size > 1024*1024 else f"{file_size / 1024:.1f} KB"
+        
         with open(input_file, "r", encoding="utf-8") as f:
             docs = json.load(f)
         
-        logger.info(f"   ✓ Loaded {len(docs)} raw documents")
+        logger.info(f"   ✓ Loaded {len(docs)} raw documents ({size_str})")
         state["documents"] = docs
         state["stats"]["input_count"] = len(docs)
         state["stats"]["input_file"] = input_file
@@ -646,17 +878,61 @@ def build_pipeline_graph(config: Dict[str, Any]) -> StateGraph:
         max_concurrent = config.get("max_concurrent", PipelineConfig.MAX_CONCURRENT_LLM_CALLS)
         semaphore = asyncio.Semaphore(max_concurrent)
         
+        # Split StackExchange Q&A threads into individual Q&A pairs
+        logger.info("📂 Splitting StackExchange Q&A threads into Q&A pairs...")
+        expanded_docs = []
+        qa_split_count = 0
+        qa_filtered_count = 0
+        for doc in docs:
+            metadata = doc.get("metadata", {})
+            if metadata.get("source_type") == "stackexchange_qa":
+                pairs = split_qa_pairs(doc)
+                if pairs:
+                    expanded_docs.extend(pairs)
+                    qa_split_count += len(pairs)
+                    if len(pairs) == 1 and pairs[0] is doc:
+                        pass  # not actually split, just passed through
+                    else:
+                        qa_filtered_count += 1  # original doc replaced by pairs
+                else:
+                    qa_filtered_count += 1  # filtered out (no answers)
+            else:
+                expanded_docs.append(doc)
+        
+        if qa_split_count > 0 or qa_filtered_count > 0:
+            logger.info(f"  Q&A split: {qa_split_count} pairs created, {qa_filtered_count} Q&A docs filtered/expanded")
+            logger.info(f"  Total docs: {len(docs)} → {len(expanded_docs)}")
+        docs = expanded_docs
+        
+        # Near-duplicate detection using MinHash LSH
+        logger.info(f"🔍 Running near-duplicate detection (MinHash LSH, threshold={PipelineConfig.NEAR_DUPLICATE_THRESHOLD})...")
+        dup_indices = find_near_duplicate_indices(docs, threshold=PipelineConfig.NEAR_DUPLICATE_THRESHOLD)
+        if dup_indices:
+            logger.info(f"🗑️ Removing {len(dup_indices)} near-duplicate documents")
+            docs = [doc for i, doc in enumerate(docs) if i not in dup_indices]
+            logger.info(f"📄 {len(docs)} documents remaining after dedup")
+        
+        # Execute all document processing concurrently (with semaphore limit)
+        total = len(docs)
+        logger.info(f"🔄 Processing {total} documents (max {max_concurrent} concurrent)...")
+        
+        # Create progress tracker and bar
+        tracker = ProgressTracker(total, desc=f"Processing ({max_concurrent}x)")
+        pbar = tracker.bar()
+        
         async def process_with_limit(doc: Dict, idx: int):
             async with semaphore:
-                return await process_single_document(
+                result = await process_single_document(
                     doc=doc,
                     llm=llm,
                     doc_idx=idx,
                     min_quality_score=config.get("min_quality_score")
                 )
-        
-        # Execute all document processing concurrently (with semaphore limit)
-        logger.info(f"🔄 Processing {len(docs)} documents (max {max_concurrent} concurrent)...")
+                # Update progress: kept or failed
+                final_doc, failed_doc = result
+                status = "kept" if final_doc else "failed"
+                tracker.update(pbar, status)
+                return result
         
         tasks = [process_with_limit(doc, idx) for idx, doc in enumerate(docs)]
         results = await asyncio.gather(*tasks, return_exceptions=True)
@@ -671,12 +947,15 @@ def build_pipeline_graph(config: Dict[str, Any]) -> StateGraph:
                     "phase": "unknown",
                     "content_hash": docs[idx].get("metadata", {}).get("content_hash", f"doc_{idx}"),
                 })
+                tracker.update(pbar, "failed")
             else:
                 final_doc, failed_doc = result
                 if final_doc:
                     processed.append(final_doc)
                 if failed_doc:
                     failed.append(failed_doc)
+        
+        pbar.close()
         
         state["processed_docs"] = processed
         state["failed_docs"] = failed
@@ -775,97 +1054,161 @@ def build_pipeline_graph(config: Dict[str, Any]) -> StateGraph:
         output_file = config.get("output_file", PipelineConfig.OUTPUT_FILE)
         failed_file = config.get("failed_file", PipelineConfig.FAILED_FILE)
         
+        # Store output paths in stats
+        state["stats"]["output_file"] = output_file
+        state["stats"]["failed_file"] = failed_file
+        
         # Ensure output directory exists
         out_dir = os.path.dirname(output_file)
         if out_dir:
             os.makedirs(out_dir, exist_ok=True)
         
         # Save processed documents
+        logger.info(f"💾 Saving {len(state['processed_docs'])} processed docs...")
         with open(output_file, "w", encoding="utf-8") as f:
             json.dump(state["processed_docs"], f, indent=2, ensure_ascii=False)
-        logger.info(f"💾 Saved {len(state['processed_docs'])} processed docs → {output_file}")
+        out_size = os.path.getsize(output_file)
+        out_size_str = f"{out_size / (1024*1024):.1f} MB" if out_size > 1024*1024 else f"{out_size / 1024:.1f} KB"
+        logger.info(f"   ✓ {output_file} ({out_size_str})")
         
         # Save failed documents (if any)
         if state["failed_docs"]:
+            logger.info(f"📋 Saving {len(state['failed_docs'])} failed docs...")
             with open(failed_file, "w", encoding="utf-8") as f:
                 json.dump(state["failed_docs"], f, indent=2, ensure_ascii=False)
-            logger.info(f"📋 Saved {len(state['failed_docs'])} failed docs → {failed_file}")
+            fail_size = os.path.getsize(failed_file)
+            fail_size_str = f"{fail_size / (1024*1024):.1f} MB" if fail_size > 1024*1024 else f"{fail_size / 1024:.1f} KB"
+            logger.info(f"   ✓ {failed_file} ({fail_size_str})")
         
         # Save statistics separately
         stats_file = output_file.replace(".json", "_stats.json")
         with open(stats_file, "w", encoding="utf-8") as f:
             json.dump(state["stats"], f, indent=2)
-        logger.info(f"📊 Saved stats → {stats_file}")
+        stats_size = os.path.getsize(stats_file)
+        logger.info(f"📊 Saved stats → {stats_file} ({stats_size} bytes)")
         
         return state
     
     # ── Node: Log Summary ──
     async def log_summary(state: PipelineState) -> PipelineState:
-        """Print a formatted summary of pipeline results."""
+        """Print a formatted box summary of pipeline results."""
         stats = state["stats"]
+        input_count = stats.get("input_count", 0)
+        processed_count = stats.get("processed_count", 0)
+        failed_count = stats.get("failed_count", 0)
+        filtered_count = input_count - processed_count - failed_count
         
-        separator = "=" * 65
-        logger.info(separator)
-        logger.info("PIPELINE COMPLETE — SUMMARY")
-        logger.info(separator)
+        # Calculate durations
+        node_times = state.get("_node_times", {})
+        total_time = sum(node_times.values()) if node_times else 0
         
-        logger.info(f"  📥 Input documents:      {stats.get('input_count', 0)}")
-        logger.info(f"  ✅ Processed (kept):     {stats.get('processed_count', 0)}")
-        logger.info(f"  ❌ Failed/Filtered:      {stats.get('failed_count', 0)}")
+        # Build bar chart helper
+        def bar_pct(pct, width=20):
+            filled = int(pct / 100 * width)
+            return "█" * filled + "░" * (width - filled)
         
-        if stats.get("input_count", 0) > 0:
-            pass_rate = (stats.get("processed_count", 0) / stats["input_count"]) * 100
-            logger.info(f"  📈 Pass rate:            {pass_rate:.1f}%")
+        # Build the box
+        lines = []
+        lines.append("")
+        lines.append("╔" + "═" * 63 + "╗")
+        lines.append("║" + " PIPELINE COMPLETE ".center(63) + "║")
+        lines.append("╠" + "═" * 63 + "╣")
         
-        logger.info("")
-        logger.info(f"  🎯 Avg Quality Score:    {stats.get('avg_quality_score', 0):.2f}")
-        logger.info(f"  📊 Score Range:          {stats.get('min_quality_score', 0)} – {stats.get('max_quality_score', 0)}")
+        # Timing
+        lines.append("║" + f" Duration: {ProgressTracker._format_secs(total_time):<53} ║")
+        if node_times:
+            timing_parts = [f"{k}: {ProgressTracker._format_secs(v)}" for k, v in node_times.items()]
+            timing_str = " | ".join(timing_parts)
+            lines.append("║" + f" Nodes: {timing_str:<50} ║")
         
-        logger.info("")
-        logger.info("  📑 Content Types:")
-        for ct, count in stats.get("content_type_distribution", {}).items():
-            pct = (count / max(stats.get("processed_count", 1), 1)) * 100
-            logger.info(f"      {ct:<18} {count:>4} ({pct:>5.1f}%)")
+        lines.append("╠" + "═" * 63 + "╣")
         
-        logger.info("")
-        logger.info("  🌐 Sources:")
-        for src, count in stats.get("source_distribution", {}).items():
-            logger.info(f"      {src:<35} {count:>4}")
+        # Counts with bar chart
+        pass_rate = (processed_count / input_count * 100) if input_count > 0 else 0
+        fail_rate = (failed_count / input_count * 100) if input_count > 0 else 0
+        filter_rate = (filtered_count / input_count * 100) if input_count > 0 else 0
         
-        logger.info("")
-        logger.info("  🔧 Top Technologies:")
-        for tech, count in list(stats.get("technology_distribution", {}).items())[:8]:
-            logger.info(f"      {tech:<25} {count:>4}")
+        lines.append(f"║" + f" Input:  {input_count:>5} docs".ljust(63) + "║")
+        lines.append(f"║" + f" Kept:   {processed_count:>5} ({pass_rate:5.1f}%)  {bar_pct(pass_rate)}".ljust(63) + "║")
+        lines.append(f"║" + f" Failed: {failed_count:>5} ({fail_rate:5.1f}%)  {bar_pct(fail_rate)}".ljust(63) + "║")
+        lines.append(f"║" + f" Skipped:  {filtered_count:>4} ({filter_rate:5.1f}%) {bar_pct(filter_rate)}".ljust(63) + "║")
         
-        if stats.get("vendor_distribution"):
-            logger.info("")
-            logger.info("  🏢 Vendors:")
-            for vendor, count in stats.get("vendor_distribution", {}).items():
+        lines.append("╠" + "═" * 63 + "╣")
+        
+        # Quality scores
+        avg_score = stats.get("avg_quality_score", 0)
+        min_score = stats.get("min_quality_score", 0)
+        max_score = stats.get("max_quality_score", 0)
+        lines.append(f"║" + f" Avg Quality: {avg_score:.2f} / 10".ljust(63) + "║")
+        lines.append(f"║" + f" Score Range: {min_score} – {max_score}".ljust(63) + "║")
+        
+        # Content types
+        ct_dist = stats.get("content_type_distribution", {})
+        if ct_dist:
+            lines.append("╠" + "═" * 63 + "╣")
+            lines.append("║" + " Content Types:".ljust(63) + "║")
+            for ct, count in sorted(ct_dist.items(), key=lambda x: -x[1]):
+                pct = (count / max(processed_count, 1)) * 100
+                ct_label = ct[:16].ljust(16)
+                bar = bar_pct(pct, 14)
+                lines.append(f"║  {ct_label} {count:>4} ({pct:5.1f}%) {bar}".ljust(63) + "║")
+        
+        # Top technologies
+        tech_dist = stats.get("technology_distribution", {})
+        if tech_dist:
+            lines.append("╠" + "═" * 63 + "╣")
+            lines.append("║" + " Top Technologies:".ljust(63) + "║")
+            for tech, count in list(tech_dist.items())[:8]:
+                lines.append(f"║  {tech[:25].ljust(25)} {count:>4}".ljust(63) + "║")
+        
+        # Vendors
+        vendor_dist = stats.get("vendor_distribution", {})
+        if vendor_dist:
+            lines.append("╠" + "═" * 63 + "╣")
+            lines.append("║" + " Vendors:".ljust(63) + "║")
+            for vendor, count in vendor_dist.items():
                 if vendor != "unspecified":
-                    logger.info(f"      {vendor:<25} {count:>4}")
+                    lines.append(f"║  {vendor[:25].ljust(25)} {count:>4}".ljust(63) + "║")
         
-        logger.info("")
-        logger.info(f"  ⚠️  Docs with syntax errors: {stats.get('docs_with_syntax_errors', 0)}")
-        logger.info(f"  💻 Docs with code blocks:    {stats.get('docs_with_code_blocks', 0)}")
+        # Code blocks & syntax errors
+        lines.append("╠" + "═" * 63 + "╣")
+        lines.append(f"║" + f" ⚠️ Syntax errors: {stats.get('docs_with_syntax_errors', 0):>3} docs".ljust(63) + "║")
+        lines.append(f"║" + f" 💻 Code blocks:   {stats.get('docs_with_code_blocks', 0):>3} docs".ljust(63) + "║")
         
-        if stats.get("failure_by_phase"):
-            logger.info("")
-            logger.info("  🚫 Failures by Phase:")
-            for phase, count in stats.get("failure_by_phase", {}).items():
-                logger.info(f"      {phase:<25} {count:>4}")
+        # Failures by phase
+        failure_phases = stats.get("failure_by_phase", {})
+        if failure_phases:
+            lines.append("╠" + "═" * 63 + "╣")
+            lines.append("║" + " Failures by Phase:".ljust(63) + "║")
+            for phase, count in sorted(failure_phases.items(), key=lambda x: -x[1]):
+                lines.append(f"║  {phase[:25].ljust(25)} {count:>4}".ljust(63) + "║")
         
-        logger.info(separator)
+        lines.append("╚" + "═" * 63 + "╝")
+        lines.append("")
+        
+        for line in lines:
+            logger.info(line)
         
         return state
     
     # ══════════════════════════════════════════════════════
     # ASSEMBLE GRAPH
     # ══════════════════════════════════════════════════════
-    graph.add_node("load_documents", load_documents)
-    graph.add_node("process_documents", process_documents)
-    graph.add_node("compute_statistics", compute_statistics)
-    graph.add_node("save_results", save_results)
-    graph.add_node("log_summary", log_summary)
+    
+    def with_timing(node_name, node_func):
+        async def timed_node(state):
+            t0 = time.perf_counter()
+            result = await node_func(state)
+            elapsed = time.perf_counter() - t0
+            result["_node_times"][node_name] = elapsed
+            return result
+        return timed_node
+    
+    graph.add_node("load_documents", with_timing("load_documents", load_documents))
+    graph.add_node("process_documents", with_timing("process_documents", process_documents))
+    graph.add_node("compute_statistics", with_timing("compute_statistics", compute_statistics))
+    graph.add_node("save_results", with_timing("save_results", save_results))
+    graph.add_node("log_summary", with_timing("log_summary", log_summary))
     
     # Define edges
     graph.add_edge(START, "load_documents")
@@ -882,7 +1225,10 @@ def build_pipeline_graph(config: Dict[str, Any]) -> StateGraph:
 # MAIN ENTRY POINT
 # ──────────────────────────────────────────────────────────
 async def run_pipeline(config: Dict[str, Any]) -> Dict[str, Any]:
-    """Execute the full data preparation pipeline."""
+    """Execute the full data preparation pipeline with timing."""
+    
+    node_times: Dict[str, float] = {}
+    start_all = time.perf_counter()
     
     initial_state: PipelineState = {
         "documents": [],
@@ -890,10 +1236,14 @@ async def run_pipeline(config: Dict[str, Any]) -> Dict[str, Any]:
         "failed_docs": [],
         "stats": {},
         "config": config,
+        "_node_times": node_times,
     }
     
     graph = build_pipeline_graph(config)
     final_state = await graph.ainvoke(initial_state)
+    
+    node_times["total"] = time.perf_counter() - start_all
+    final_state["_node_times"] = node_times
     
     return final_state
 
@@ -993,8 +1343,8 @@ Examples:
     parser.add_argument(
         "--timeout",
         type=int,
-        default=60,
-        help="LLM request timeout in seconds (default: 60)"
+        default=120,
+        help="LLM request timeout in seconds (default: 120)"
     )
     parser.add_argument(
         "--max-text-length",
@@ -1019,7 +1369,9 @@ Examples:
     
     # Configure logging level
     if args.verbose:
-        logging.getLogger().setLevel(logging.DEBUG)
+        _console_handler.setLevel(logging.INFO)
+    else:
+        _console_handler.setLevel(logging.CRITICAL + 1)  # disable console output
     
     # Build configuration dict
     config = {

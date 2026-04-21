@@ -5,6 +5,7 @@ import { Slider } from "../ui/slider";
 import { Tooltip, TooltipContent, TooltipTrigger, TooltipProvider } from "../ui/tooltip";
 import { ChevronDown, ChevronUp } from "lucide-react";
 import { Button } from "../ui/button";
+import { cn } from "@/lib/utils";
 
 type SearchSettingsProps = {
   searchType: "hybrid" | "semantic" | "keyword";
@@ -13,6 +14,8 @@ type SearchSettingsProps = {
   onRrfSparseWeightChange: (weight: number) => void;
   minRelevance: number;
   onMinRelevanceChange: (value: number) => void;
+  enableReranking?: boolean;
+  onRerankingChange?: (value: boolean) => void;
 };
 
 export function SearchSettings({
@@ -22,6 +25,8 @@ export function SearchSettings({
   onRrfSparseWeightChange,
   minRelevance,
   onMinRelevanceChange,
+  enableReranking = true,
+  onRerankingChange,
 }: SearchSettingsProps) {
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const showWeightSlider = searchType === "hybrid";
@@ -138,6 +143,33 @@ export function SearchSettings({
               </p>
             </div>
           )}
+          <div className="flex items-center justify-between">
+            <Label htmlFor="rerank-toggle" className="text-xs text-muted">
+              Cross-Encoder Reranking
+            </Label>
+            <button
+              id="rerank-toggle"
+              type="button"
+              role="switch"
+              aria-checked={enableReranking}
+              onClick={() => onRerankingChange?.(!enableReranking)}
+              className={cn(
+                "relative inline-flex h-5 w-9 items-center rounded-full transition-colors",
+                enableReranking ? "bg-accent" : "bg-muted"
+              )}
+            >
+              <span
+                className={cn(
+                  "inline-block h-3.5 w-3.5 rounded-full bg-white transition-transform",
+                  enableReranking ? "translate-x-5" : "translate-x-0.5"
+                )}
+              />
+            </button>
+          </div>
+          <p className="px-1 text-[10px] text-muted">
+            +20% precision, re-ranks top-50 results
+          </p>
+
           <div className="px-1 text-xs text-muted">
             <p>
               Smart Query Rewriting: <span className="font-medium text-accent">ON</span>

@@ -47,6 +47,8 @@ type StreamSubmitOptions = {
         rrf_dense_weight?: number;
         min_relevance_score?: number;
         enable_query_rewriting?: boolean;
+        enable_reranking?: boolean;
+        rerank_top_n?: number;
       };
     };
     command?: unknown;
@@ -242,6 +244,8 @@ export const StreamProvider: React.FC<{ children: ReactNode }> = ({
           rrf_dense_weight: cfg?.rrf_dense_weight,
           min_relevance_score: cfg?.min_relevance_score,
           enable_query_rewriting: cfg?.enable_query_rewriting,
+          enable_reranking: cfg?.enable_reranking ?? true,
+          rerank_top_n: cfg?.rerank_top_n ?? 50,
         }),
       });
 

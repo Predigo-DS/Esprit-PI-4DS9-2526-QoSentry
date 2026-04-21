@@ -3,6 +3,7 @@ import uuid
 import io
 import math
 import hashlib
+import re
 from datetime import datetime, timezone
 from qdrant_client import QdrantClient
 from qdrant_client.models import (
@@ -21,12 +22,33 @@ from qdrant_client.models import (
     RrfQuery,
     Rrf,
     DatetimeRange,
+    Range,
 )
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from pypdf import PdfReader
 from dotenv import load_dotenv
+import numpy as np
+from scipy.spatial.distance import cosine
 
 load_dotenv()
+
+
+# ── Common stopwords to ignore in sparse vectors ──────────────────────────────
+_STOPWORDS = frozenset({
+    "a", "an", "the", "and", "or", "but", "in", "on", "at", "to", "for",
+    "of", "with", "by", "from", "is", "it", "as", "be", "was", "are",
+    "were", "been", "has", "have", "had", "do", "does", "did", "will",
+    "would", "could", "should", "may", "might", "can", "this", "that",
+    "these", "those", "not", "no", "nor", "so", "if", "then", "than",
+    "too", "very", "just", "about", "above", "after", "again", "all",
+    "also", "am", "any", "because", "before", "between", "both", "each",
+    "few", "further", "get", "he", "her", "here", "him", "his", "how",
+    "i", "into", "its", "let", "me", "more", "most", "my", "myself",
+    "new", "now", "only", "other", "our", "out", "over", "own", "same",
+    "she", "some", "such", "them", "there", "they", "through", "up",
+    "us", "we", "what", "when", "which", "while", "who", "whom", "why",
+    "you", "your",
+})
 
 
 def normalize_score(score: float, search_type: str, is_rrf: bool = False) -> float:
@@ -54,7 +76,7 @@ def normalize_score(score: float, search_type: str, is_rrf: bool = False) -> flo
 
 
 COLLECTION = os.getenv("QDRANT_COLLECTION", "qos_buddy")
-VECTOR_SIZE = 1024  # bge-m3 dense dimension
+VECTOR_SIZE = 1024  # Qwen3-Embedding-0.6B dense dimension
 CHUNK_SIZE = int(os.getenv("CHUNK_SIZE", 1024))
 CHUNK_OVERLAP = int(os.getenv("CHUNK_OVERLAP", 128))
 
@@ -90,6 +112,36 @@ class VectorStoreClient:
                 field_name="expires_at",
                 field_schema=PayloadSchemaType.DATETIME,
             )
+            self.client.create_payload_index(
+                collection_name=COLLECTION,
+                field_name="content_type",
+                field_schema=PayloadSchemaType.KEYWORD,
+            )
+            self.client.create_payload_index(
+                collection_name=COLLECTION,
+                field_name="vendor",
+                field_schema=PayloadSchemaType.KEYWORD,
+            )
+            self.client.create_payload_index(
+                collection_name=COLLECTION,
+                field_name="technology",
+                field_schema=PayloadSchemaType.KEYWORD,
+            )
+            self.client.create_payload_index(
+                collection_name=COLLECTION,
+                field_name="quality_score",
+                field_schema=PayloadSchemaType.INTEGER,
+            )
+            self.client.create_payload_index(
+                collection_name=COLLECTION,
+                field_name="has_code",
+                field_schema=PayloadSchemaType.BOOLEAN,
+            )
+            self.client.create_payload_index(
+                collection_name=COLLECTION,
+                field_name="status",
+                field_schema=PayloadSchemaType.KEYWORD,
+            )
         except Exception as e:
             print(f"Warning: could not create payload indexes: {e}")
 
@@ -107,23 +159,194 @@ class VectorStoreClient:
             )
             self._create_payload_indexes()
 
-    def _convert_sparse_to_qdrant(self, sparse_dict: dict) -> SparseVector:
-        """Convert bge-m3 sparse vector (token_id -> weight dict) to Qdrant SparseVector.
-        
-        bge-m3 token IDs can exceed Qdrant's 65536 limit, so we hash them deterministically.
+    def _split_into_segments(self, text: str) -> list[tuple[str, str]]:
+        """Split text into prose and code block segments.
+
+        Returns list of (type, content) tuples where type is 'prose' or 'code'.
         """
-        if not sparse_dict:
+        segments = []
+        code_pattern = re.compile(r'```[\s\S]*?```', re.MULTILINE)
+        prose_parts = code_pattern.split(text)
+
+        code_matches = code_pattern.finditer(text)
+        code_positions = [(m.start(), m.end(), m.group()) for m in code_matches]
+
+        prose_idx = 0
+        for start, end, code_content in code_positions:
+            if prose_idx < start:
+                prose = text[prose_idx:start].strip()
+                if prose:
+                    segments.append(("prose", prose))
+            segments.append(("code", code_content.strip()))
+            prose_idx = end
+
+        if prose_idx < len(text):
+            prose = text[prose_idx:].strip()
+            if prose:
+                segments.append(("prose", prose))
+
+        if not segments:
+            segments.append(("prose", text.strip()))
+
+        return segments
+
+    def _merge_code_to_chunks(self, chunks: list[str], code_blocks: list[str]) -> list[str]:
+        """Merge code blocks into the nearest adjacent chunks."""
+        if not code_blocks or not chunks:
+            return chunks + code_blocks
+
+        result = []
+        code_idx = 0
+
+        for chunk in chunks:
+            if code_idx < len(code_blocks):
+                combined = chunk + "\n\n" + code_blocks[code_idx]
+                result.append(combined)
+                code_idx += 1
+            else:
+                result.append(chunk)
+
+        while code_idx < len(code_blocks):
+            result.append(code_blocks[code_idx])
+            code_idx += 1
+
+        return result
+
+    def _semantic_split(self, text: str, threshold: float = 0.75) -> list[str]:
+        """Chunk text by semantic similarity using embeddings (no LLM needed).
+
+        Algorithm:
+        1. Split text into segments (prose and code blocks)
+        2. Apply semantic chunking to prose segments
+        3. Preserve code blocks as atomic units, merge to adjacent chunks
+        4. Handle very long code blocks with fallback splitter
+        """
+        if not self.embedder:
+            return []
+
+        segments = self._split_into_segments(text)
+        chunks: list[str] = []
+        code_blocks: list[str] = []
+
+        for seg_type, seg_content in segments:
+            if seg_type == "code":
+                if len(seg_content) > 500:
+                    try:
+                        splitter = RecursiveCharacterTextSplitter(
+                            chunk_size=CHUNK_SIZE, chunk_overlap=CHUNK_OVERLAP
+                        )
+                        code_chunks = splitter.split_text(seg_content)
+                        code_blocks.extend([c for c in code_chunks if c.strip()])
+                    except Exception:
+                        code_blocks.append(seg_content)
+                else:
+                    code_blocks.append(seg_content)
+            else:
+                prose_chunks = self._chunk_prose(seg_content, threshold)
+                chunks.extend(prose_chunks)
+
+        if not chunks and not code_blocks:
+            return []
+
+        if chunks:
+            chunks = self._merge_code_to_chunks(chunks, code_blocks)
+        else:
+            chunks = code_blocks
+
+        return [c.strip() for c in chunks if c.strip()]
+
+    def _chunk_prose(self, prose: str, threshold: float) -> list[str]:
+        """Apply semantic chunking to a prose segment."""
+        sentences = re.split(r'(?<=[.!?])\s+', prose.strip())
+        sentences = [s.strip() for s in sentences if s.strip()]
+
+        if len(sentences) <= 1:
+            return sentences
+
+        batch_size = 64
+        embeddings = []
+        for i in range(0, len(sentences), batch_size):
+            batch = sentences[i:i + batch_size]
+            emb = self.embedder.encode(batch, show_progress_bar=False)
+            embeddings.extend(emb.tolist())
+
+        embeddings = np.array(embeddings)
+
+        similarities = []
+        for i in range(len(sentences) - 1):
+            sim = 1.0 - cosine(embeddings[i], embeddings[i + 1])
+            similarities.append(sim)
+
+        if threshold == "percentile":
+            threshold = float(os.getenv("SEMANTIC_CHUNK_THRESHOLD", "85")) / 100.0
+            threshold = np.percentile(similarities, threshold)
+
+        break_points = []
+        for i, sim in enumerate(similarities):
+            if sim < threshold:
+                break_points.append(i + 1)
+
+        if not break_points:
+            return sentences
+
+        chunks = []
+        start = 0
+        for bp in break_points:
+            chunk = " ".join(sentences[start:bp])
+            if chunk.strip():
+                chunks.append(chunk.strip())
+            start = bp
+        if start < len(sentences):
+            chunk = " ".join(sentences[start:])
+            if chunk.strip():
+                chunks.append(chunk.strip())
+
+        return chunks
+
+    def _tokenize(self, text: str) -> list[str]:
+        """Tokenize text into meaningful terms, filtering stopwords and short tokens."""
+        # Lowercase and extract alphanumeric tokens (including hyphenated words)
+        tokens = re.findall(r"[a-z0-9]+(?:-[a-z0-9]+)*", text.lower())
+        # Filter stopwords and very short tokens
+        tokens = [t for t in tokens if t not in _STOPWORDS and len(t) > 2]
+        return tokens
+
+    def _generate_sparse_vector(self, text: str) -> SparseVector:
+        """Generate sparse vector from text using TF-IDF-like hashing.
+
+        Uses MD5-hashed token indices mapped to Qdrant's 65536 sparse index space.
+        Weight = log(1 + tf) * log(N / df) approximation (IDF-like).
+        Also generates bigrams for multi-word terms.
+        """
+        tokens = self._tokenize(text)
+        if not tokens:
             return SparseVector(indices=[], values=[])
-        
-        index_to_value: dict[int, float] = {}
-        for token_id, weight in sparse_dict.items():
-            hashed_idx = int(hashlib.md5(str(token_id).encode()).hexdigest()[:8], 16) % 65536
-            index_to_value[hashed_idx] = index_to_value.get(hashed_idx, 0.0) + float(weight)
-        
-        sorted_items = sorted(index_to_value.items())
-        indices = [idx for idx, _ in sorted_items]
-        values = [val for _, val in sorted_items]
-        return SparseVector(indices=indices, values=values)
+
+        # Term frequency
+        tf: dict[str, int] = {}
+        for t in tokens:
+            tf[t] = tf.get(t, 0) + 1
+
+        # Bigrams
+        for i in range(len(tokens) - 1):
+            bigram = f"{tokens[i]}_{tokens[i + 1]}"
+            tf[bigram] = tf.get(bigram, 0) + 1
+
+        # Build sparse vector with IDF-like weighting
+        # Simulate N=10000 (estimated corpus size) and df=1 for IDF max
+        N = 10000
+        index_to_weight: dict[int, float] = {}
+        for token, count in tf.items():
+            idx = int(hashlib.md5(token.encode()).hexdigest()[:8], 16) % 65536
+            # log(1 + tf) * log(N / df) — IDF approx with df=1
+            weight = math.log1p(count) * math.log(N + 1)
+            index_to_weight[idx] = index_to_weight.get(idx, 0.0) + weight
+
+        sorted_items = sorted(index_to_weight.items())
+        return SparseVector(
+            indices=[i for i, _ in sorted_items],
+            values=[v for _, v in sorted_items],
+        )
 
     def reset_collection(self):
         self.client.delete_collection(COLLECTION)
@@ -136,29 +359,57 @@ class VectorStoreClient:
             "ingested_at", datetime.now(timezone.utc).isoformat()
         )
 
-        splitter = RecursiveCharacterTextSplitter(
-            chunk_size=CHUNK_SIZE, chunk_overlap=CHUNK_OVERLAP
-        )
-        chunks = splitter.split_text(text)
+        # Use semantic chunking (falls back to recursive if embedder unavailable)
+        try:
+            chunks = self._semantic_split(text)
+        except Exception:
+            splitter = RecursiveCharacterTextSplitter(
+                chunk_size=CHUNK_SIZE, chunk_overlap=CHUNK_OVERLAP
+            )
+            chunks = splitter.split_text(text)
+        
         if not chunks:
             return []
 
-        # bge-m3 returns dict with 'dense_vecs', 'sparse_vecs', 'lexical_weights'
-        result = embedder.encode(chunks, return_dense=True, return_sparse=True, return_colbert_vecs=False)
-        dense_vectors = result['dense_vecs'].tolist()
-        sparse_vectors_list = result['sparse_vecs']
+        dense_vectors = embedder.encode(chunks).tolist()
 
         points, ids = [], []
-        for chunk, dense_vec, sparse_dict in zip(chunks, dense_vectors, sparse_vectors_list):
+        for chunk_idx, (chunk, dense_vec) in enumerate(zip(chunks, dense_vectors)):
             pid = str(uuid.uuid4())
             ids.append(pid)
 
-            sparse_vec = self._convert_sparse_to_qdrant(sparse_dict)
+            sparse_vec = self._generate_sparse_vector(chunk)
+            
+            payload = {
+                "text": chunk,
+                "source": payload_metadata.get("source", ""),
+                "url": payload_metadata.get("url", ""),
+                "title": payload_metadata.get("title", ""),
+                "source_type": payload_metadata.get("source_type", ""),
+                "content_type": payload_metadata.get("content_type", ""),
+                "tags": payload_metadata.get("tags", []),
+                "quality_score": payload_metadata.get("llm_quality_score", 0),
+                "technical_score": payload_metadata.get("technical_score", 0),
+                "vendor": payload_metadata.get("vendor", ""),
+                "technology": payload_metadata.get("technology", []),
+                "version_tag": payload_metadata.get("version_tag", ""),
+                "has_code": payload_metadata.get("code_block") is not None,
+                "context_summary": payload_metadata.get("context_summary", ""),
+                "chunk_index": chunk_idx,
+                "parent_doc_hash": payload_metadata.get("content_hash", ""),
+                "ingested_at": payload_metadata.get("ingested_at", ""),
+                "status": payload_metadata.get("status", ""),
+                "llm_action": payload_metadata.get("llm_action", ""),
+                "llm_verified": payload_metadata.get("llm_verified", False),
+                "text_was_enriched": payload_metadata.get("text_was_enriched", False),
+                "problem_summary": payload_metadata.get("problem_summary", ""),
+            }
+            
             points.append(
                 PointStruct(
                     id=pid,
                     vector={"dense": dense_vec, "sparse": sparse_vec},
-                    payload={"text": chunk, **payload_metadata},
+                    payload=payload,
                 )
             )
         self.client.upsert(collection_name=COLLECTION, points=points)
@@ -172,16 +423,16 @@ class VectorStoreClient:
         tenant_id: str = None,
         data_category: str = None,
         access_levels: list[str] = None,
+        content_type: str = None,
+        vendor: str = None,
+        min_quality_score: int = None,
         dense_weight: float = 0.7,
         min_score: float = 0.5,
     ) -> list[dict]:
         embedder = embedder or self.embedder
 
-        # bge-m3 query encoding
-        query_result = embedder.encode([query], return_dense=True, return_sparse=True, return_colbert_vecs=False)
-        dense_query_vector = query_result['dense_vecs'].tolist()[0]
-        query_sparse_dict = query_result['sparse_vecs'][0]
-        sparse_query_vector = self._convert_sparse_to_qdrant(query_sparse_dict)
+        dense_query_vector = embedder.encode([query]).tolist()[0]
+        sparse_query_vector = self._generate_sparse_vector(query)
 
         filter_conditions = []
 
@@ -200,6 +451,24 @@ class VectorStoreClient:
         if access_levels:
             filter_conditions.append(
                 FieldCondition(key="access_level", match=MatchValue(any=access_levels))
+            )
+
+        if content_type:
+            filter_conditions.append(
+                FieldCondition(key="content_type", match=MatchValue(value=content_type))
+            )
+
+        if vendor:
+            filter_conditions.append(
+                FieldCondition(key="vendor", match=MatchValue(value=vendor))
+            )
+
+        if min_quality_score is not None:
+            filter_conditions.append(
+                FieldCondition(
+                    key="quality_score",
+                    range=Range(gte=min_quality_score)
+                )
             )
 
         search_filter = Filter(must=filter_conditions) if filter_conditions else None
@@ -232,33 +501,110 @@ class VectorStoreClient:
             norm_score = normalize_score(r.score, "hybrid", is_rrf=True)
 
             if norm_score >= min_score:
+                payload = r.payload or {}
+                text = payload.get("text", "")
+
                 normalized_results.append(
                     {
-                        "text": r.payload.get("text", ""),
+                        "text": text,
                         "score": norm_score,
                         "raw_score": float(r.score),
                         "metadata": {
                             key: value
-                            for key, value in r.payload.items()
+                            for key, value in payload.items()
                             if key != "text"
                         },
                     }
                 )
 
+  # Fallback: if hybrid returns too few results, try dense-only
+        if len(normalized_results) < 3:
+            dense_results = self.search(
+                dense_query_vector, top_k=top_k * 2,
+                tenant_id=tenant_id, data_category=data_category,
+                access_levels=access_levels, content_type=content_type,
+                vendor=vendor, min_quality_score=min_quality_score,
+                min_score=min_score,
+            )
+            existing_texts = {r["text"] for r in normalized_results}
+            for r in dense_results:
+                if r["text"] not in existing_texts:
+                    normalized_results.append({
+                        "text": r["text"],
+                        "score": r["score"],
+                        "raw_score": r["score"],
+                        "metadata": r["metadata"],
+                    })
+                    existing_texts.add(r["text"])
+                if len(normalized_results) >= top_k:
+                    break
+
         return normalized_results
 
-    def search(self, query_vector: list[float], top_k: int = 5) -> list[dict]:
+    def search(
+        self, query_vector: list[float], top_k: int = 5,
+        tenant_id: str = None, data_category: str = None,
+        access_levels: list[str] = None, content_type: str = None,
+        vendor: str = None, min_quality_score: int = None,
+        min_score: float = 0.5,
+    ) -> list[dict]:
+        filter_conditions = []
+
+        if tenant_id:
+            filter_conditions.append(
+                FieldCondition(key="tenant_id", match=MatchValue(value=tenant_id))
+            )
+
+        if data_category:
+            filter_conditions.append(
+                FieldCondition(
+                    key="data_category", match=MatchValue(value=data_category)
+                )
+            )
+
+        if access_levels:
+            filter_conditions.append(
+                FieldCondition(key="access_level", match=MatchValue(any=access_levels))
+            )
+
+        if content_type:
+            filter_conditions.append(
+                FieldCondition(key="content_type", match=MatchValue(value=content_type))
+            )
+
+        if vendor:
+            filter_conditions.append(
+                FieldCondition(key="vendor", match=MatchValue(value=vendor))
+            )
+
+        if min_quality_score is not None:
+            filter_conditions.append(
+                FieldCondition(
+                    key="quality_score",
+                    range=Range(gte=min_quality_score)
+                )
+            )
+
+        search_filter = Filter(must=filter_conditions) if filter_conditions else None
+
         results = self.client.query_points(
             collection_name=COLLECTION,
             query=query_vector,
             using="dense",
             limit=top_k,
+            query_filter=search_filter,
             with_payload=True,
         )
-        return [
-            {"text": r.payload.get("text", ""), "score": r.score, "metadata": r.payload}
-            for r in results.points
-        ]
+        results_list = []
+        for r in results.points:
+            payload = r.payload or {}
+            text = payload.get("text", "")
+            results_list.append({
+                "text": text,
+                "score": r.score,
+                "metadata": {k: v for k, v in payload.items() if k != "text"}
+            })
+        return results_list
 
     def keyword_search(
         self,
@@ -268,14 +614,13 @@ class VectorStoreClient:
         tenant_id: str = None,
         data_category: str = None,
         access_levels: list[str] = None,
+        content_type: str = None,
+        vendor: str = None,
+        min_quality_score: int = None,
         min_score: float = 0.5,
     ) -> list[dict]:
-        """Keyword-only search using sparse vectors from bge-m3"""
-        embedder = embedder or self.embedder
-
-        query_result = embedder.encode([query], return_dense=False, return_sparse=True, return_colbert_vecs=False)
-        query_sparse_dict = query_result['sparse_vecs'][0]
-        sparse_query_vector = self._convert_sparse_to_qdrant(query_sparse_dict)
+        """Keyword-only search using manually generated sparse vectors."""
+        sparse_query_vector = self._generate_sparse_vector(query)
 
         filter_conditions = []
 
@@ -296,6 +641,24 @@ class VectorStoreClient:
                 FieldCondition(key="access_level", match=MatchValue(any=access_levels))
             )
 
+        if content_type:
+            filter_conditions.append(
+                FieldCondition(key="content_type", match=MatchValue(value=content_type))
+            )
+
+        if vendor:
+            filter_conditions.append(
+                FieldCondition(key="vendor", match=MatchValue(value=vendor))
+            )
+
+        if min_quality_score is not None:
+            filter_conditions.append(
+                FieldCondition(
+                    key="quality_score",
+                    range=Range(gte=min_quality_score)
+                )
+            )
+
         search_filter = Filter(must=filter_conditions) if filter_conditions else None
 
         results = self.client.query_points(
@@ -312,14 +675,17 @@ class VectorStoreClient:
             norm_score = normalize_score(r.score, "keyword")
 
             if norm_score >= min_score:
+                payload = r.payload or {}
+                text = payload.get("text", "")
+
                 normalized_results.append(
                     {
-                        "text": r.payload.get("text", ""),
+                        "text": text,
                         "score": norm_score,
                         "raw_score": float(r.score),
                         "metadata": {
                             key: value
-                            for key, value in r.payload.items()
+                            for key, value in payload.items()
                             if key != "text"
                         },
                     }

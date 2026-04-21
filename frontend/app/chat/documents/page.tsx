@@ -2,7 +2,7 @@
 
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
-import { ArrowLeft, Database, LoaderCircle, RefreshCw, Search, Trash2, Upload, ChevronDown, ChevronUp, Filter } from "lucide-react";
+import { ArrowLeft, Database, LoaderCircle, RefreshCw, Search, Trash2, ChevronDown, ChevronUp, Filter, FileJson, Upload, CheckCircle2, XCircle } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -18,17 +18,29 @@ type RagDocument = {
   source: string;
   chunk_count: number;
   last_updated?: string | null;
+  content_type?: string;
+  avg_quality?: number;
 };
 
 type RetrieveChunk = {
   text: string;
   score: number;
   metadata?: Record<string, unknown>;
+  rerank_score?: number | null;
+  is_reranked?: boolean;
 };
 
 type SearchType = "hybrid" | "semantic" | "keyword";
 
-const ACCEPTED_EXTENSIONS = [".pdf", ".txt", ".md"];
+type BatchIngestResult = {
+  total_documents: number;
+  ingested_documents: number;
+  total_chunks: number;
+  sources: Record<string, number>;
+  errors: Array<{ index: number; error?: string; source?: string }>;
+};
+
+const ACCEPTED_EXTENSIONS = [".pdf", ".txt", ".md", ".json"];
 
 async function readErrorMessage(response: Response): Promise<string> {
   const text = await response.text();
@@ -56,6 +68,21 @@ export default function DocumentsPage(): React.ReactNode {
   const [selectedFiles, setSelectedFiles] = useState<File[]>([]);
   const [uploading, setUploading] = useState(false);
 
+  // JSON upload state
+  const [jsonFile, setJsonFile] = useState<File | null>(null);
+  const [jsonPreview, setJsonPreview] = useState<{
+    count: number;
+    sample?: Record<string, unknown>;
+    sampleMetadata?: Record<string, unknown>;
+  } | null>(null);
+  const [jsonUploading, setJsonUploading] = useState(false);
+  const [jsonProgress, setJsonProgress] = useState<{
+    current: number;
+    total: number;
+    results?: BatchIngestResult;
+    status: "processing" | "complete" | "error";
+  } | null>(null);
+
   const [documents, setDocuments] = useState<RagDocument[]>([]);
   const [documentsLoading, setDocumentsLoading] = useState(true);
   const [documentsError, setDocumentsError] = useState<string | null>(null);
@@ -75,6 +102,15 @@ export default function DocumentsPage(): React.ReactNode {
   // Metadata filters
   const [filterDataCategory, setFilterDataCategory] = useState<string>("");
   const [filterTenantId, setFilterTenantId] = useState<string>("");
+  const [filterContentType, setFilterContentType] = useState<string>("");
+  const [filterVendor, setFilterVendor] = useState<string>("");
+  const [filterQualityScore, setFilterQualityScore] = useState<string>("");
+  const [filterStatus, setFilterStatus] = useState<string>("");
+
+  const [availableFilters, setAvailableFilters] = useState<{
+    contentTypes: string[];
+    vendors: string[];
+  }>({ contentTypes: [], vendors: [] });
 
   // Comparison mode
   const [comparisonMode, setComparisonMode] = useState(false);
@@ -106,6 +142,19 @@ export default function DocumentsPage(): React.ReactNode {
       const data = Array.isArray(payload?.data) ? payload.data : [];
       setDocuments(data);
       setTotalChunks(Number(payload?.total_chunks ?? 0));
+
+      // Extract available filter values from documents
+      const contentTypes = new Set<string>();
+      const vendors = new Set<string>();
+      for (const doc of data) {
+        const meta = (doc as any).metadata;
+        if (meta?.content_type) contentTypes.add(meta.content_type);
+        if (meta?.vendor) vendors.add(meta.vendor);
+      }
+      setAvailableFilters({
+        contentTypes: Array.from(contentTypes).sort(),
+        vendors: Array.from(vendors).sort(),
+      });
     } catch (error) {
       const message = error instanceof Error ? error.message : "Failed to load documents.";
       setDocumentsError(message);
@@ -118,6 +167,97 @@ export default function DocumentsPage(): React.ReactNode {
     loadDocuments();
   }, [loadDocuments]);
 
+  // JSON file preview
+  const handleJsonFileSelect = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const files = event.target.files;
+    if (!files || files.length === 0) return;
+
+    const file = files[0];
+    if (!file.name.toLowerCase().endsWith(".json")) {
+      toast.error("Not a JSON file.", { description: "Please select a .json file." });
+      return;
+    }
+
+    try {
+      const text = await file.text();
+      const parsed = JSON.parse(text);
+
+      if (!Array.isArray(parsed)) {
+        toast.error("Invalid JSON format.", { description: "Expected a JSON array of documents." });
+        return;
+      }
+
+      const count = parsed.length;
+      let sample: Record<string, unknown> | undefined;
+      let sampleMetadata: Record<string, unknown> | undefined;
+
+      if (count > 0) {
+        sample = parsed[0] as Record<string, unknown>;
+        sampleMetadata = (sample?.metadata || {}) as Record<string, unknown>;
+      }
+
+      setJsonFile(file);
+      setJsonPreview({ count, sample, sampleMetadata });
+      toast.success(`${count} document(s) found in file.`);
+    } catch {
+      toast.error("Invalid JSON.", { description: "Could not parse the file as JSON." });
+    }
+  };
+
+  const ingestJsonFile = async () => {
+    if (!jsonFile || jsonUploading) return;
+
+    setJsonUploading(true);
+    setJsonProgress({ current: 0, total: 0, status: "processing" });
+
+    try {
+      const text = await jsonFile.text();
+      const documents = JSON.parse(text);
+
+      if (!Array.isArray(documents)) {
+        throw new Error("Expected a JSON array of documents.");
+      }
+
+      setJsonProgress({ current: 0, total: documents.length, status: "processing" });
+
+      const response = await fetch(`${ragApiUrl}/ingest/batch`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ documents }),
+      });
+
+      if (!response.ok) {
+        const detail = await readErrorMessage(response);
+        throw new Error(`Batch ingestion failed: ${detail}`);
+      }
+
+      const result: BatchIngestResult = await response.json();
+
+      setJsonProgress({
+        current: result.ingested_documents,
+        total: result.total_documents,
+        results: result,
+        status: result.errors.length > 0 ? "error" : "complete",
+      });
+
+      if (result.errors.length > 0) {
+        toast.warning(`Ingested ${result.ingested_documents}/${result.total_documents} documents (${result.errors.length} errors).`, {
+          description: `Generated ${result.total_chunks} chunks. Check details below.`,
+        });
+      } else {
+        toast.success(`Ingested ${result.ingested_documents} documents → ${result.total_chunks} chunks.`);
+      }
+
+      await loadDocuments();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Batch ingestion failed.";
+      setJsonProgress({ current: 0, total: jsonPreview?.count || 0, status: "error" });
+      toast.error("Batch ingestion failed.", { description: message });
+    } finally {
+      setJsonUploading(false);
+    }
+  };
+
   const onFileChange = (event: React.ChangeEvent<HTMLInputElement>) => {
     const files = Array.from(event.target.files ?? []);
     const acceptedFiles = files.filter((file) => {
@@ -128,7 +268,7 @@ export default function DocumentsPage(): React.ReactNode {
     const rejected = files.filter((file) => !acceptedFiles.includes(file));
     if (rejected.length > 0) {
       toast.error("Unsupported file type.", {
-        description: "Only .pdf, .txt, and .md files are supported in this page.",
+        description: "Only .pdf, .txt, .md, and .json files are supported.",
       });
     }
 
@@ -144,7 +284,7 @@ export default function DocumentsPage(): React.ReactNode {
 
     if (selectedFiles.length === 0) {
       toast.error("No files selected.", {
-        description: "Choose one or more .pdf, .txt, or .md files before uploading.",
+        description: "Choose one or more .pdf, .txt, .md, or .json files before uploading.",
       });
       return;
     }
@@ -240,17 +380,27 @@ export default function DocumentsPage(): React.ReactNode {
     setRetrieveLoading(true);
     setComparisonResults(null);
     try {
+      const body: Record<string, unknown> = {
+        query: query.trim(),
+        top_k: Math.max(1, Number(topK) || 5),
+        search_type: searchType,
+      };
+
+      if (searchType === "hybrid") {
+        body.rrf_dense_weight = denseWeight;
+      }
+      if (filterDataCategory) body.tenant_id = filterDataCategory;
+      if (filterTenantId) body.tenant_id = filterTenantId;
+     if (filterTenantId) body.tenant_id = filterTenantId;
+      if (filterContentType && filterContentType !== "all") body.content_type = filterContentType;
+      if (filterVendor && filterVendor !== "all") body.vendor = filterVendor;
+      if (filterQualityScore && filterQualityScore !== "all") body.min_quality_score = Number(filterQualityScore);
+      if (filterStatus && filterStatus !== "all") body.status = filterStatus;
+
       const response = await fetch(`${ragApiUrl}/retrieve`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          query: query.trim(),
-          top_k: Math.max(1, Number(topK) || 5),
-          search_type: searchType,
-          rrf_dense_weight: searchType === "hybrid" ? denseWeight : undefined,
-          data_category: filterDataCategory || undefined,
-          tenant_id: filterTenantId || undefined,
-        }),
+        body: JSON.stringify(body),
       });
 
       if (!response.ok) {
@@ -277,25 +427,25 @@ export default function DocumentsPage(): React.ReactNode {
     setComparisonLoading(true);
     setRetrieveResults([]);
     try {
+      const baseBody: Record<string, unknown> = {
+        query: query.trim(),
+        top_k: Math.max(1, Number(topK) || 5),
+      };
+      if (filterContentType && filterContentType !== "all") baseBody.content_type = filterContentType;
+      if (filterVendor && filterVendor !== "all") baseBody.vendor = filterVendor;
+      if (filterQualityScore && filterQualityScore !== "all") baseBody.min_quality_score = Number(filterQualityScore);
+      if (filterStatus && filterStatus !== "all") baseBody.status = filterStatus;
+
       const [hybridResp, semanticResp] = await Promise.all([
         fetch(`${ragApiUrl}/retrieve`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            query: query.trim(),
-            top_k: Math.max(1, Number(topK) || 5),
-            search_type: "hybrid",
-            rrf_dense_weight: denseWeight,
-          }),
+          body: JSON.stringify({ ...baseBody, search_type: "hybrid", rrf_dense_weight: denseWeight }),
         }),
         fetch(`${ragApiUrl}/retrieve`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            query: query.trim(),
-            top_k: Math.max(1, Number(topK) || 5),
-            search_type: "semantic",
-          }),
+          body: JSON.stringify({ ...baseBody, search_type: "semantic" }),
         }),
       ]);
 
@@ -336,7 +486,7 @@ export default function DocumentsPage(): React.ReactNode {
   const ChunkCard: React.FC<{ chunk: RetrieveChunk; index: number; prefix?: string }> = ({ chunk, index, prefix }) => {
     const chunkKey = prefix ? `${prefix}-${index}` : `result-${index}`;
     const isExpanded = expandedChunks.has(chunkKey);
-    
+
     return (
       <div className="rounded-lg border border-border bg-surface p-4">
         <div className="mb-2 flex items-center justify-between text-xs text-muted">
@@ -387,7 +537,7 @@ export default function DocumentsPage(): React.ReactNode {
             </div>
             <h1 className="text-3xl font-semibold tracking-tight text-text-main">Documents</h1>
             <p className="text-sm text-muted">
-              Upload files, manage indexed documents, and test retrieval quality.
+              Upload files or JSON documents, manage indexed documents, and test retrieval quality.
             </p>
           </div>
           <div className="flex items-center gap-2">
@@ -444,11 +594,12 @@ export default function DocumentsPage(): React.ReactNode {
           <Card>
             <CardHeader>
               <CardTitle>Upload to RAG</CardTitle>
-              <CardDescription>Supported: PDF and UTF-8 text files.</CardDescription>
+              <CardDescription>Supported: PDF, text files, and JSON document arrays.</CardDescription>
             </CardHeader>
             <CardContent className="space-y-4">
+              {/* Standard file upload */}
               <div className="grid gap-2">
-                <Label htmlFor="rag-file-upload">Files</Label>
+                <Label htmlFor="rag-file-upload">Files (.pdf, .txt, .md)</Label>
                 <Input
                   id="rag-file-upload"
                   type="file"
@@ -477,7 +628,7 @@ export default function DocumentsPage(): React.ReactNode {
               <Button
                 type="button"
                 onClick={uploadFiles}
-                disabled={uploading}
+                disabled={uploading || selectedFiles.length === 0}
               >
                 {uploading ? (
                   <LoaderCircle className="size-4 animate-spin" />
@@ -485,6 +636,130 @@ export default function DocumentsPage(): React.ReactNode {
                   <Upload className="size-4" />
                 )}
                 {uploading ? "Uploading..." : "Upload Files"}
+              </Button>
+
+              <Separator />
+
+              {/* JSON upload */}
+              <div className="grid gap-2">
+                <Label htmlFor="json-file-upload">
+                  <span className="flex items-center gap-1">
+                    <FileJson className="size-3" />
+                    JSON Documents (.json)
+                  </span>
+                </Label>
+                <Input
+                  id="json-file-upload"
+                  type="file"
+                  accept=".json,application/json"
+                  onChange={handleJsonFileSelect}
+                  disabled={jsonUploading}
+                />
+                <p className="text-xs text-muted">
+                  Upload a JSON array of documents (e.g., from the preparer pipeline).
+                </p>
+              </div>
+
+              {jsonPreview && (
+                <div className="rounded-lg border border-border bg-surface p-3">
+                  <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-muted">
+                    Preview
+                  </p>
+                  <div className="space-y-2">
+                    <div className="flex items-center justify-between text-sm">
+                      <span className="text-text-main">{jsonFile?.name}</span>
+                      <span className="text-muted">{jsonPreview.count} document(s)</span>
+                    </div>
+                    {jsonPreview.sampleMetadata && Object.keys(jsonPreview.sampleMetadata).length > 0 && (
+                      <div className="rounded bg-background p-2 text-xs">
+                        <p className="mb-1 font-medium text-muted">Sample metadata fields:</p>
+                        <div className="space-y-0.5">
+                          {Object.entries(jsonPreview.sampleMetadata).slice(0, 5).map(([key, value]) => (
+                            <div key={key} className="flex justify-between">
+                              <span className="text-muted">{key}:</span>
+                              <span className="text-text-main truncate ml-4 max-w-[200px]">
+                                {Array.isArray(value) ? `[${value.length}]` : String(value).slice(0, 60)}
+                              </span>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
+
+              {jsonProgress && (
+                <div className="rounded-lg border border-border bg-surface p-3">
+                  <div className="mb-2 flex items-center justify-between">
+                    <span className="text-sm font-medium">
+                      {jsonProgress.status === "processing" && "Ingesting..."}
+                      {jsonProgress.status === "complete" && "Ingestion complete"}
+                      {jsonProgress.status === "error" && "Ingestion failed"}
+                    </span>
+                    <span className="text-xs text-muted">
+                      {jsonProgress.current} / {jsonProgress.total}
+                    </span>
+                  </div>
+
+                  {jsonProgress.status === "processing" && (
+                    <div className="h-2 w-full overflow-hidden rounded-full bg-muted">
+                      <div
+                        className="h-full bg-primary transition-all"
+                        style={{ width: `${jsonProgress.total > 0 ? (jsonProgress.current / jsonProgress.total) * 100 : 0}%` }}
+                      />
+                    </div>
+                  )}
+
+                  {jsonProgress.results && jsonProgress.status !== "processing" && (
+                    <div className="mt-3 space-y-2">
+                      <div className="flex items-center gap-2 text-sm">
+                        <CheckCircle2 className="size-4 text-green-500" />
+                        <span>{jsonProgress.results.ingested_documents} ingested</span>
+                      </div>
+                      <div className="flex items-center gap-2 text-sm">
+                        <CheckCircle2 className="size-4 text-blue-500" />
+                        <span>{jsonProgress.results.total_chunks} chunks</span>
+                      </div>
+                      {jsonProgress.results.errors.length > 0 && (
+                        <div className="flex items-center gap-2 text-sm">
+                          <XCircle className="size-4 text-red-500" />
+                          <span>{jsonProgress.results.errors.length} errors</span>
+                        </div>
+                      )}
+
+                      {jsonProgress.results.errors.length > 0 && (
+                        <details className="mt-2">
+                          <summary className="cursor-pointer text-xs text-muted hover:text-text-main">
+                            Show errors
+                          </summary>
+                          <ul className="mt-1 space-y-1 text-xs text-red-400">
+                            {jsonProgress.results.errors.slice(0, 10).map((err, i) => (
+                              <li key={i}>
+                                Doc #{err.index}: {err.error}
+                                {err.source && ` (${err.source})`}
+                              </li>
+                            ))}
+                          </ul>
+                        </details>
+                      )}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              <Button
+                type="button"
+                onClick={ingestJsonFile}
+                disabled={jsonUploading || !jsonFile}
+                className="w-full"
+              >
+                {jsonUploading ? (
+                  <LoaderCircle className="size-4 animate-spin" />
+                ) : (
+                  <FileJson className="size-4" />
+                )}
+                {jsonUploading ? "Ingesting..." : "Ingest JSON Documents"}
               </Button>
             </CardContent>
           </Card>
@@ -568,6 +843,16 @@ export default function DocumentsPage(): React.ReactNode {
                 </div>
                 <div className="grid grid-cols-2 gap-2">
                   <div>
+                    <Label htmlFor="filter-tenant" className="text-xs">Tenant ID</Label>
+                    <Input
+                      id="filter-tenant"
+                      value={filterTenantId}
+                      onChange={(e) => setFilterTenantId(e.target.value)}
+                      placeholder="e.g., user_1"
+                      className="text-xs"
+                    />
+                  </div>
+                  <div>
                     <Label htmlFor="filter-category" className="text-xs">Data Category</Label>
                     <Input
                       id="filter-category"
@@ -577,15 +862,64 @@ export default function DocumentsPage(): React.ReactNode {
                       className="text-xs"
                     />
                   </div>
+                </div>
+                <div className="grid grid-cols-2 gap-2">
                   <div>
-                    <Label htmlFor="filter-tenant" className="text-xs">Tenant ID</Label>
-                    <Input
-                      id="filter-tenant"
-                      value={filterTenantId}
-                      onChange={(e) => setFilterTenantId(e.target.value)}
-                      placeholder="e.g., user_1"
-                      className="text-xs"
-                    />
+                    <Label htmlFor="filter-content-type" className="text-xs">Content Type</Label>
+                    <Select value={filterContentType} onValueChange={setFilterContentType}>
+                      <SelectTrigger id="filter-content-type">
+                        <SelectValue placeholder="All types" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="all">All types</SelectItem>
+                        {availableFilters.contentTypes.map((ct) => (
+                          <SelectItem key={ct} value={ct}>{ct}</SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <div>
+                    <Label htmlFor="filter-vendor" className="text-xs">Vendor</Label>
+                    <Select value={filterVendor} onValueChange={setFilterVendor}>
+                      <SelectTrigger id="filter-vendor">
+                        <SelectValue placeholder="All vendors" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="all">All vendors</SelectItem>
+                        {availableFilters.vendors.map((v) => (
+                          <SelectItem key={v} value={v}>{v}</SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                </div>
+                <div className="grid grid-cols-2 gap-2">
+                  <div>
+                    <Label htmlFor="filter-quality" className="text-xs">Min Quality Score</Label>
+                    <Select value={filterQualityScore} onValueChange={setFilterQualityScore}>
+                      <SelectTrigger id="filter-quality">
+                        <SelectValue placeholder="No filter" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="all">No filter</SelectItem>
+                        {[1,2,3,4,5,6,7,8,9,10].map((s) => (
+                          <SelectItem key={s} value={String(s)}>{s}+</SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <div>
+                    <Label htmlFor="filter-status" className="text-xs">Status</Label>
+                    <Select value={filterStatus} onValueChange={setFilterStatus}>
+                      <SelectTrigger id="filter-status">
+                        <SelectValue placeholder="All" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="all">All</SelectItem>
+                        <SelectItem value="verified">Verified</SelectItem>
+                        <SelectItem value="needs_review">Needs Review</SelectItem>
+                      </SelectContent>
+                    </Select>
                   </div>
                 </div>
               </div>
@@ -729,6 +1063,8 @@ export default function DocumentsPage(): React.ReactNode {
                     <tr className="border-b border-border text-left text-xs uppercase tracking-wide text-muted">
                       <th className="py-2 pr-3">Source</th>
                       <th className="py-2 pr-3">Chunks</th>
+                      <th className="py-2 pr-3">Content Type</th>
+                      <th className="py-2 pr-3">Avg Quality</th>
                       <th className="py-2 pr-3">Last Updated</th>
                       <th className="py-2">Action</th>
                     </tr>
@@ -741,6 +1077,12 @@ export default function DocumentsPage(): React.ReactNode {
                       >
                         <td className="py-3 pr-3 font-medium text-text-main">{doc.source}</td>
                         <td className="py-3 pr-3 text-muted">{doc.chunk_count}</td>
+                        <td className="py-3 pr-3 text-muted">
+                          {(doc as any).content_type || "-"}
+                        </td>
+                        <td className="py-3 pr-3 text-muted">
+                          {(doc as any).avg_quality != null ? (doc as any).avg_quality.toFixed(1) : "-"}
+                        </td>
                         <td className="py-3 pr-3 text-muted">
                           {doc.last_updated
                             ? new Date(doc.last_updated).toLocaleString()

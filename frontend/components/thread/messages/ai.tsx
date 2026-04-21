@@ -159,11 +159,11 @@ export function AssistantMessage({
                </div>
              )}
 
-{message && (message as any).metadata?.sources && (message as any).metadata.sources.length > 0 && (
+{message && ((message as any).additional_kwargs?.metadata?.sources || (message as any).metadata?.sources) && ((message as any).additional_kwargs?.metadata?.sources || (message as any).metadata?.sources).length > 0 && (
                 <SourceDisplay 
-                  sources={(message as any).metadata.sources} 
-                  searchType={(message as any).metadata.search_type}
-                  rewrittenQueries={(message as any).metadata.rewritten_queries}
+                  sources={(message as any).additional_kwargs?.metadata?.sources || (message as any).metadata?.sources} 
+                  searchType={(message as any).additional_kwargs?.metadata?.search_type || (message as any).metadata?.search_type}
+                  rewrittenQueries={(message as any).additional_kwargs?.metadata?.rewritten_queries || (message as any).metadata?.rewritten_queries}
                 />
               )}
 

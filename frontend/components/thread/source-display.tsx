@@ -3,12 +3,14 @@ import { Card, CardContent } from "../ui/card";
 import { Button } from "../ui/button";
 import { Badge } from "../ui/badge";
 import { Separator } from "../ui/separator";
-import { ChevronDown, ChevronUp, FileText, Search, Sparkles } from "lucide-react";
+import { ChevronDown, ChevronUp, FileText, Search, Sparkles, CheckCircle2, XCircle } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 type Source = {
   text: string;
   score: number;
+  rerank_score?: number | null;
+  is_reranked?: boolean;
   metadata: {
     source?: string;
     ingested_at?: string;
@@ -22,6 +24,17 @@ type SourceDisplayProps = {
   rewrittenQueries?: string[] | null;
   originalQuery?: string;
 };
+
+function sigmoid(x: number): number {
+  return 1 / (1 + Math.exp(-x));
+}
+
+function getDisplayScore(source: Source): number {
+  if (source.rerank_score !== null && source.rerank_score !== undefined) {
+    return sigmoid(source.rerank_score);
+  }
+  return source.score;
+}
 
 function getRelevanceColor(score: number): string {
   if (score >= 0.8) return "bg-accent";
@@ -142,20 +155,31 @@ export function SourceDisplay({ sources, searchType, rewrittenQueries, originalQ
                   {docSources.map((source, sourceIdx) => {
                     const key = `${docName}-${sourceIdx}`;
                     const isExpanded = expandedSources.has(key);
-                    const rawPercentage = source.score * 100;
-                    const percentage = isNaN(rawPercentage) ? 0 : Math.round(rawPercentage);
-                    const relevanceColor = getRelevanceColor(source.score);
-                    const relevanceLabel = getRelevanceLabel(source.score);
+                    const isReranked = source.is_reranked === true;
+                    const hasRerankScore = source.rerank_score !== null && source.rerank_score !== undefined;
+                    const displayScore = getDisplayScore(source);
+                    const displayPercentage = isNaN(displayScore * 100) ? 0 : Math.round(displayScore * 100);
+                    const hybridPercentage = isNaN(source.score * 100) ? 0 : Math.round(source.score * 100);
+                    const relevanceColor = getRelevanceColor(displayScore);
+                    const relevanceLabel = getRelevanceLabel(displayScore);
 
                     return (
                       <div
                         key={key}
-                        className="border border-border rounded-lg overflow-hidden bg-background"
+                        className={cn(
+                          "rounded-lg overflow-hidden bg-background transition-opacity duration-200",
+                          isReranked
+                            ? "border border-accent/50"
+                            : "border border-border/50 opacity-50"
+                        )}
                       >
                         <Button
                           variant="ghost"
                           onClick={() => toggleExpand(key)}
-                          className="w-full justify-between px-3 py-2.5 text-left hover:bg-background"
+                          className={cn(
+                            "w-full justify-between px-3 py-2.5 text-left hover:bg-background transition-colors",
+                            !isReranked && "hover:bg-background/80"
+                          )}
                         >
                           <div className="flex items-center gap-2 flex-1">
                             <div className="flex items-center gap-2">
@@ -164,7 +188,7 @@ export function SourceDisplay({ sources, searchType, rewrittenQueries, originalQ
                                   "h-2 w-2 rounded-full",
                                   relevanceColor
                                 )}
-                                title={`${percentage}% relevance`}
+                                title={`${displayPercentage}% relevance`}
                               />
                               <span className="text-sm font-medium text-text-main">
                                 Chunk #{sourceIdx + 1}
@@ -175,16 +199,36 @@ export function SourceDisplay({ sources, searchType, rewrittenQueries, originalQ
                             </span>
                           </div>
                           <div className="flex items-center gap-2">
-                            <Badge
-                              className={cn(
-                                "text-xs",
-                                percentage >= 80 && "bg-accent/10 text-accent hover:bg-accent/10",
-                                percentage >= 60 && percentage < 80 && "bg-primary/10 text-primary hover:bg-primary/10",
-                                percentage < 60 && "bg-orange-400/10 text-orange-400 hover:bg-orange-400/10"
-                              )}
-                            >
-                              {percentage}%
-                            </Badge>
+                            {hasRerankScore ? (
+                              <>
+                                {isReranked ? (
+                                  <CheckCircle2 className="h-3.5 w-3.5 text-accent" />
+                                ) : (
+                                  <XCircle className="h-3.5 w-3.5 text-muted" />
+                                )}
+                                <Badge
+                                  className={cn(
+                                    "text-xs",
+                                    displayPercentage >= 80 && "bg-accent/10 text-accent hover:bg-accent/10",
+                                    displayPercentage >= 60 && displayPercentage < 80 && "bg-primary/10 text-primary hover:bg-primary/10",
+                                    displayPercentage < 60 && "bg-orange-400/10 text-orange-400 hover:bg-orange-400/10"
+                                  )}
+                                >
+                                  {displayPercentage}%
+                                </Badge>
+                              </>
+                            ) : (
+                              <Badge
+                                className={cn(
+                                  "text-xs",
+                                  hybridPercentage >= 80 && "bg-accent/10 text-accent hover:bg-accent/10",
+                                  hybridPercentage >= 60 && hybridPercentage < 80 && "bg-primary/10 text-primary hover:bg-primary/10",
+                                  hybridPercentage < 60 && "bg-orange-400/10 text-orange-400 hover:bg-orange-400/10"
+                                )}
+                              >
+                                {hybridPercentage}%
+                              </Badge>
+                            )}
                             {isExpanded ? (
                               <ChevronUp className="h-3 w-3 text-muted" />
                             ) : (
@@ -195,15 +239,49 @@ export function SourceDisplay({ sources, searchType, rewrittenQueries, originalQ
 
                         {isExpanded && (
                           <div className="border-t border-border px-3 py-3 bg-background">
-                            <div className="flex items-center gap-2 mb-2">
+                            <div className="flex items-center gap-2 mb-2 flex-wrap">
                               <Search className="h-3 w-3 text-muted" />
                               <span className="text-xs text-muted">
-                                Relevance: {percentage}% ({relevanceLabel})
+                                Relevance: {displayPercentage}% ({relevanceLabel})
                               </span>
+                              {hasRerankScore && (
+                                <>
+                                  <span className="text-xs text-muted">
+                                    {"\u2022"}
+                                  </span>
+                                  <span className={cn(
+                                    "text-xs font-medium",
+                                    isReranked ? "text-accent" : "text-muted"
+                                  )}>
+                                    {isReranked ? "Kept by reranker" : "Filtered by reranker"}
+                                  </span>
+                                  <span className="text-xs text-muted">
+                                    {"\u2022"}
+                                  </span>
+                                  <span className="text-xs text-muted">
+                                    Rerank: {displayPercentage}%
+                                  </span>
+                                  {source.score !== undefined && (
+                                    <>
+                                      <span className="text-xs text-muted">
+                                        {"\u2022"}
+                                      </span>
+                                      <span className="text-xs text-muted">
+                                        Hybrid: {hybridPercentage}%
+                                      </span>
+                                    </>
+                                  )}
+                                </>
+                              )}
                               {source.metadata.ingested_at && (
-                                <span className="text-xs text-muted">
-                                  {"\u2022"} Added: {new Date(source.metadata.ingested_at).toLocaleDateString()}
-                                </span>
+                                <>
+                                  <span className="text-xs text-muted">
+                                    {"\u2022"}
+                                  </span>
+                                  <span className="text-xs text-muted">
+                                    Added: {new Date(source.metadata.ingested_at).toLocaleDateString()}
+                                  </span>
+                                </>
                               )}
                             </div>
                             <p className="text-sm text-text-main leading-relaxed whitespace-pre-wrap">

@@ -23,7 +23,7 @@ function StatusLine(props: {
     return (
       <div className="mt-2 space-y-1">
         <div className="flex items-center justify-between text-[11px]">
-          <span className="text-muted">Downloading bge-m3 model... (~1.3 GB)</span>
+          <span className="text-muted">Downloading Qwen3-Embedding-0.6B model... (~1.2 GB)</span>
           <span className="text-muted">{barWidth}%</span>
         </div>
         <div className="h-1.5 w-full overflow-hidden rounded-full bg-border">
