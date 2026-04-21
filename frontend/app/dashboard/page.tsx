@@ -4,7 +4,7 @@ import { useEffect, useState } from 'react'
 import { useRouter } from 'next/navigation'
 import Link from 'next/link'
 import { motion } from 'framer-motion'
-import { Activity, LogOut, LayoutDashboard, Cpu, AlertTriangle, TrendingUp, Shield, MessageSquare } from 'lucide-react'
+import { Activity, LogOut, LayoutDashboard, Cpu, AlertTriangle, TrendingUp, Shield, MessageSquare, Zap } from 'lucide-react'
 import { isAuthenticated, getUsername, getRole } from '@/lib/auth'
 import { useAuth } from '@/hooks/useAuth'
 
@@ -173,6 +173,29 @@ export default function DashboardPage() {
               className="inline-flex items-center justify-center rounded-xl px-4 py-2 text-sm font-semibold bg-primary/20 text-primary border border-primary/40 hover:bg-primary/30 transition-colors"
             >
               Open Chat Workspace
+            </Link>
+          </motion.div>
+
+          {/* Optimization Agent */}
+          <motion.div
+            initial={{ opacity: 0, y: 30 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ delay: 0.4, duration: 0.5 }}
+            className="glass rounded-2xl p-6 border border-border hover:border-primary/40 transition-colors mb-12"
+          >
+            <p className="text-xs uppercase tracking-wide text-primary font-semibold mb-2">AI Agent</p>
+            <h3 className="text-xl font-bold text-text-main mb-2 flex items-center gap-2">
+              <Zap className="w-5 h-5 text-primary" />
+              Network Optimization
+            </h3>
+            <p className="text-sm text-muted mb-5">
+              Full pipeline: telemetry ingestion → anomaly detection → SLA forecasting → LangGraph agent decision with tool execution trace.
+            </p>
+            <Link
+              href="/inference/optimization"
+              className="inline-flex items-center justify-center rounded-xl px-4 py-2 text-sm font-semibold bg-primary/20 text-primary border border-primary/40 hover:bg-primary/30 transition-colors"
+            >
+              Open Optimization Agent
             </Link>
           </motion.div>
 
