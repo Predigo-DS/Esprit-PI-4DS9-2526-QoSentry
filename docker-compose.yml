@@ -38,15 +38,12 @@ services:
       - qdrant_data:/qdrant/storage
     networks:
       - qos-network
-    entrypoint: >
-      sh -c "apt-get update -qq && apt-get install -y -qq curl &&
-      exec /qdrant/qdrant"
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:6333/readyz"]
+      test: ["CMD", "/qdrant/qdrant", "--help"]
       interval: 10s
       timeout: 5s
       retries: 5
-      start_period : 90s
+      start_period : 30s
 
   # ─────────────────────────────────────────
   # RAG SERVICE  (ingestion + retrieval)
@@ -183,6 +180,7 @@ services:
       APP_JWT_EXPIRATION_MS: 86400000
       AI_ANOMALY_BASE_URL: http://anomaly_detection:8003
       AI_SLA_BASE_URL: http://sla_forecasting:8004
+      AI_AGENT_BASE_URL: http://agent:8002
     depends_on:
       postgres:
         condition: service_healthy
@@ -191,6 +189,8 @@ services:
       anomaly_detection:
         condition: service_healthy
       sla_forecasting:
+        condition: service_healthy
+      agent:
         condition: service_healthy
     networks:
       - qos-network

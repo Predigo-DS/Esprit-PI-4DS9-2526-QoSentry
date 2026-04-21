@@ -193,7 +193,11 @@ def _load_inference_state() -> None:
 
 def _require_ready() -> None:
     if "model" not in _state or "artifacts" not in _state:
-        raise HTTPException(status_code=503, detail="Model artifacts are not loaded")
+        detail = "Model artifacts are not loaded"
+        startup_error = _state.get("startup_error")
+        if startup_error:
+            detail = f"{detail}: {startup_error}"
+        raise HTTPException(status_code=503, detail=detail)
 
 
 def _apply_clips(X: np.ndarray, features: list[str], clip_bounds: dict[str, tuple[float, float]]) -> np.ndarray:
@@ -245,16 +249,22 @@ app.add_middleware(
 
 @app.on_event("startup")
 def startup_event() -> None:
-    _load_inference_state()
+    try:
+        _load_inference_state()
+        _state["startup_error"] = None
+    except Exception as e:
+        _state["startup_error"] = str(e)
 
 
 @app.get("/health")
 def health() -> dict[str, Any]:
     ready = "model" in _state and "artifacts" in _state
+    startup_error = _state.get("startup_error")
     return {
-        "status": "ok" if ready else "starting",
+        "status": "ok" if ready else "degraded",
         "service": "anomaly_detection",
         "ready": ready,
+        "startup_error": startup_error,
         "model_type": _state.get("artifacts", {}).get("model_type") if ready else None,
     }
 

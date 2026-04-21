@@ -303,7 +303,11 @@ def _load_state() -> None:
 def _require_ready() -> None:
     keys = ["preprocess", "label_encoder", "seg_encoder", "tcn", "bilstm"]
     if any(k not in _state for k in keys):
-        raise HTTPException(status_code=503, detail="SLA models are not ready")
+        detail = "SLA models are not ready"
+        startup_error = _state.get("startup_error")
+        if startup_error:
+            detail = f"{detail}: {startup_error}"
+        raise HTTPException(status_code=503, detail=detail)
 
 
 def _preprocess_rows(df_raw: pd.DataFrame, run_id: str, segment: str) -> np.ndarray:
@@ -432,16 +436,22 @@ app.add_middleware(
 
 @app.on_event("startup")
 def startup_event() -> None:
-    _load_state()
+    try:
+        _load_state()
+        _state["startup_error"] = None
+    except Exception as e:
+        _state["startup_error"] = str(e)
 
 
 @app.get("/health")
 def health() -> dict[str, Any]:
     ready = all(k in _state for k in ["tcn", "bilstm", "preprocess", "label_encoder"])
+    startup_error = _state.get("startup_error")
     return {
-        "status": "ok" if ready else "starting",
+        "status": "ok" if ready else "degraded",
         "service": "sla_forecasting",
         "ready": ready,
+        "startup_error": startup_error,
     }
 
 
