@@ -107,10 +107,10 @@ services:
       - OLLAMA_API_KEY=dummy-key-for-ollama
       - TOKEN_FACTORY_API_KEY=${TOKEN_FACTORY_API_KEY:-}
       - ACTION_REDIS_URL=redis://qosentry-redis:6379
-      - MININET_API_URL=http://10.230.232.213:8000
+      - MININET_API_URL=http://192.168.249.132:8000
       - OLLAMA_BASE_URL=http://${WINDOWS_HOST_IP}:11434
     extra_hosts:
-      - "mininet-vm:192.168.1.104"
+      - "mininet-vm:192.168.249.132"
       - "host.docker.internal:host-gateway"
       - "windows-host:${WINDOWS_HOST_IP}"
 
@@ -198,6 +198,7 @@ services:
       AI_ANOMALY_BASE_URL: http://anomaly_detection:8003
       AI_SLA_BASE_URL: http://sla_forecasting:8004
       AI_AGENT_BASE_URL: http://agent:8002
+      AI_RAG_BASE_URL: http://rag:8001
       APP_AI_ALLOW_MOCK: "false"
     depends_on:
       postgres:

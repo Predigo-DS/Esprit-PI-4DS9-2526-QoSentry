@@ -39,3 +39,4 @@ app:
     anomaly-base-url: ${AI_ANOMALY_BASE_URL:http://localhost:8003}
     sla-base-url: ${AI_SLA_BASE_URL:http://localhost:8004}
     agent-base-url: ${AI_AGENT_BASE_URL:http://localhost:8002}
+    rag-base-url: ${AI_RAG_BASE_URL:http://localhost:8001}

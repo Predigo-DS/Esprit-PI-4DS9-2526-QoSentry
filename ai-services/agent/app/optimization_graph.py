@@ -44,31 +44,6 @@ def _send_action(payload: dict) -> dict:
 # Network tools — send HTTP to Mininet FastAPI
 # ──────────────────────────────────────────
 
-def reroute_traffic(device: str, path: str) -> dict:
-    print(f"[TOOL] reroute_traffic device={device} path={path}")
-    return _send_action({"action": "reroute_traffic", "device": device, "path": path})
-
-
-def throttle_link(device: str, interface: str, rate_limit_mbps: float) -> dict:
-    print(f"[TOOL] throttle_link device={device} interface={interface} rate={rate_limit_mbps}Mbps")
-    return _send_action({"action": "throttle_link", "device": device, "interface": interface, "rate_limit_mbps": rate_limit_mbps})
-
-
-def restart_interface(device: str, interface: str) -> dict:
-    print(f"[TOOL] restart_interface device={device} interface={interface}")
-    return _send_action({"action": "restart_interface", "device": device, "interface": interface})
-
-
-def apply_qos_profile(device: str, profile: str) -> dict:
-    print(f"[TOOL] apply_qos_profile device={device} profile={profile}")
-    return _send_action({"action": "apply_qos_profile", "device": device, "profile": profile})
-
-
-def monitor_only(device: str, reason: str = "") -> dict:
-    print(f"[TOOL] monitor_only device={device} reason={reason}")
-    return {"status": "ok", "action": "monitor_only", "device": device, "reason": reason}
-
-
 def _decision_summary(decision_summary: str, recommended_actions: list, confidence, risk_level: str) -> dict:
     """Captures the agent's final structured decision."""
     try:
@@ -85,42 +60,35 @@ def _decision_summary(decision_summary: str, recommended_actions: list, confiden
     }
 
 
-TOOL_REGISTRY = {
-    "reroute_traffic": reroute_traffic,
-    "throttle_link": throttle_link,
-    "restart_interface": restart_interface,
-    "apply_qos_profile": apply_qos_profile,
-    "monitor_only": monitor_only,
-}
-
 # LangChain tool schemas for binding
 from langchain_core.tools import tool as lc_tool
 
 @lc_tool
-def reroute_traffic_tool(device: str, path: str) -> dict:
+def reroute_traffic(device: str, path: str) -> dict:  # noqa: F811
     """Reroute network traffic for a device through a specified path."""
-    return reroute_traffic(device, path)
+    return _send_action({"action": "reroute_traffic", "device": device, "path": path})
 
 @lc_tool
-def throttle_link_tool(device: str, interface: str, rate_limit_mbps: float) -> dict:
+def throttle_link(device: str, interface: str, rate_limit_mbps: float) -> dict:  # noqa: F811
     """Throttle a network link to the given rate limit in Mbps."""
-    return throttle_link(device, interface, rate_limit_mbps)
+    return _send_action({"action": "throttle_link", "device": device, "interface": interface, "rate_limit_mbps": rate_limit_mbps})
 
 @lc_tool
-def restart_interface_tool(device: str, interface: str) -> dict:
+def restart_interface(device: str, interface: str) -> dict:  # noqa: F811
     """Restart a network interface on a device."""
-    return restart_interface(device, interface)
+    return _send_action({"action": "restart_interface", "device": device, "interface": interface})
 
 @lc_tool
-def apply_qos_profile_tool(device: str, profile: str) -> dict:
+def apply_qos_profile(device: str, profile: str) -> dict:  # noqa: F811
     """Apply a QoS profile to a device."""
-    return apply_qos_profile(device, profile)
+    return _send_action({"action": "apply_qos_profile", "device": device, "profile": profile})
 
 
 @lc_tool
-def monitor_only_tool(device: str, reason: str = "") -> dict:
-    """Take no remediation action — continue monitoring the device. Use when uncertainty is high or situation is stable."""
-    return monitor_only(device, reason)
+def monitor_only(device: str, reason: str = "") -> dict:  # noqa: F811
+    """Take no remediation action — ONLY use when all metrics are within normal baseline range (NORMAL scenario). NEVER use when plr > 5%, delay > 100ms, or MOS < 3.0."""
+    print(f"[TOOL] monitor_only device={device} reason={reason}")
+    return _send_action({"action": "monitor_only", "device": device, "reason": reason})
 
 
 @lc_tool
@@ -136,11 +104,11 @@ def decision_summary_tool(decision_summary: str, recommended_actions: list, conf
 
 
 BOUND_TOOLS = [
-    reroute_traffic_tool,
-    throttle_link_tool,
-    restart_interface_tool,
-    apply_qos_profile_tool,
-    monitor_only_tool,
+    reroute_traffic,
+    throttle_link,
+    restart_interface,
+    apply_qos_profile,
+    monitor_only,
     decision_summary_tool,
 ]
 
@@ -186,7 +154,7 @@ You have full autonomy to choose any combination of tools that fits the situatio
     Best for: a single interface with extreme degradation that needs a hard reset.
 
 - monitor_only(device, reason)
-    No network change. Best for: NORMAL state or when uncertainty is too high to act.
+    No network change. ONLY for NORMAL state (all metrics at baseline). FORBIDDEN if any alert is active.
 
 - decision_summary_tool (ALWAYS call this last)
 
@@ -199,6 +167,7 @@ You have full autonomy to choose any combination of tools that fits the situatio
 3. Only use apply_qos_profile when 2 or more interfaces are degraded, or when the scenario is CALL_DROP/POOR_VOICE_QUALITY.
 4. Do NOT default to apply_qos_profile for single-interface issues — it is a broad hammer, not a precision tool.
 5. You may call multiple tools if different interfaces need different actions.
+6. MANDATORY: If plr > 5% OR delay > 100ms OR MOS < 3.0 OR anomaly_detected OR sla_alert — you MUST call a remediation tool. monitor_only is FORBIDDEN in these conditions. "Uncertainty" is never a reason to skip remediation when metrics are clearly degraded.
 
 == YOUR TASK ==
 You receive telemetry every 15-30 seconds enriched with anomaly detection and SLA forecasting results.
@@ -329,11 +298,11 @@ def tool_execution_node(state: OptimizationState) -> dict:
         tool_id = tc.get("id", tool_name)
 
         fn_map = {
-            "reroute_traffic_tool": reroute_traffic_tool,
-            "throttle_link_tool": throttle_link_tool,
-            "restart_interface_tool": restart_interface_tool,
-            "apply_qos_profile_tool": apply_qos_profile_tool,
-            "monitor_only_tool": monitor_only_tool,
+            "reroute_traffic": reroute_traffic,
+            "throttle_link": throttle_link,
+            "restart_interface": restart_interface,
+            "apply_qos_profile": apply_qos_profile,
+            "monitor_only": monitor_only,
             "decision_summary_tool": decision_summary_tool,
         }
         fn = fn_map.get(tool_name)
@@ -440,7 +409,7 @@ def build_optimization_graph(base_url: str, api_key: str | None = None, model: s
         model=model,
         base_url=base_url,
         api_key=api_key or "unused",
-        temperature=0.6,
+        temperature=0.3,
     )
     llm_with_tools = llm.bind_tools(BOUND_TOOLS)
 

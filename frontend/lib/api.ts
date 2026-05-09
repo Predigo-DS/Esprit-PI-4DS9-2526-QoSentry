@@ -230,6 +230,18 @@ export function getApiErrorMessage(error: unknown): string {
   return 'Unexpected error'
 }
 
+export interface ServicesHealth {
+  anomaly_detection: 'online' | 'offline'
+  sla_forecasting:   'online' | 'offline'
+  agent:             'online' | 'offline'
+  rag:               'online' | 'offline'
+}
+
+export async function getServicesHealth(): Promise<ServicesHealth> {
+  const response = await apiClient.get<ServicesHealth>('/api/ai/health')
+  return response.data
+}
+
 export interface TelemetryStatus {
   buffer_size: number
   live_mode: boolean

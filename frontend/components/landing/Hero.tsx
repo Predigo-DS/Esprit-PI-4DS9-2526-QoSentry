@@ -154,8 +154,8 @@ export default function Hero() {
             transition={{ duration: 0.7 }}
             className="max-w-3xl text-lg sm:text-xl text-muted leading-relaxed"
           >
-            QoSentry combines SDN telemetry, machine learning, and generative AI to predict SLA
-            breaches, detect anomalies, and generate executive reports — before your network fails.
+            QoSentry combines SDN telemetry, ensemble ML models, and a LangGraph orchestration agent
+            to detect anomalies, forecast SLA breaches, and recommend remediations — in real time.
           </motion.p>
 
           {/* CTAs */}

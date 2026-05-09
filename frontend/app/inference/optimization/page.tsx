@@ -753,7 +753,41 @@ export default function OptimizationPage() {
         </div>
       </header>
 
-      <main className="max-w-7xl mx-auto px-6 py-8">
+      {/* ── Environment gate ─────────────────────────────────────────────── */}
+      {!isLive && (
+        <div className="max-w-7xl mx-auto px-6 py-24 flex flex-col items-center justify-center text-center">
+          <motion.div
+            initial={{ opacity: 0, y: 20 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ duration: 0.5 }}
+            className="glass rounded-3xl border border-amber-400/30 bg-amber-400/5 p-16 max-w-xl w-full"
+          >
+            <div className="w-16 h-16 rounded-2xl bg-amber-400/10 border border-amber-400/30 flex items-center justify-center mx-auto mb-6">
+              <WifiOff className="w-8 h-8 text-amber-400" />
+            </div>
+            <h2 className="text-2xl font-black text-white mb-3">Mininet environment not connected</h2>
+            <p className="text-muted text-sm leading-relaxed mb-8">
+              The optimization pipeline requires a live Mininet + Ryu SDN telemetry feed.
+              Start the network simulation and listener script, then this page will activate automatically.
+            </p>
+            <div className="space-y-3 text-left bg-black/20 rounded-xl p-5 font-mono text-xs text-muted border border-border">
+              <p className="text-amber-400 font-semibold mb-2"># Start the environment</p>
+              <p><span className="text-primary">1.</span> Start Mininet + Ryu controller on the VM</p>
+              <p><span className="text-primary">2.</span> Run <span className="text-white">python listen.py</span> to push telemetry to Redis</p>
+              <p><span className="text-primary">3.</span> This page will activate within 5 seconds</p>
+            </div>
+            <div className="flex items-center justify-center gap-2 mt-8 text-xs text-muted">
+              <span className="relative flex h-2 w-2">
+                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-muted opacity-40" />
+                <span className="relative inline-flex rounded-full h-2 w-2 bg-muted/60" />
+              </span>
+              Checking for live feed every 5s…
+            </div>
+          </motion.div>
+        </div>
+      )}
+
+      <main className={`max-w-7xl mx-auto px-6 py-8 ${!isLive ? 'hidden' : ''}`}>
 
         {/* ── EXECUTIVE TAB ──────────────────────────────────────────────── */}
         {tab === 'executive' && (

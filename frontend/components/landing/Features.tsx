@@ -2,15 +2,15 @@
 
 import { useRef } from 'react'
 import { motion, useInView } from 'framer-motion'
-import { TrendingUp, FlaskConical, Bot, FileText } from 'lucide-react'
+import { TrendingUp, ShieldAlert, Zap, MessageSquare } from 'lucide-react'
 
 const features = [
   {
-    icon: TrendingUp,
-    title: 'Predictive Intelligence',
+    icon: ShieldAlert,
+    title: 'Anomaly Detection',
     description:
-      'Anticipates SLA breaches before they impact end users via time-series forecasting. LSTM autoencoders and Prophet models analyze historical telemetry to surface anomalies up to 15 minutes in advance.',
-    tag: 'LSTM / Prophet',
+      'Ensemble of three autoencoder architectures — BiLSTM, TCN, and Transformer — detect anomalous network windows in real time via reconstruction error scoring against configurable thresholds.',
+    tag: 'BiLSTM · TCN · Transformer',
     gradient: 'from-primary/20 to-primary/5',
     border: 'border-primary/20 hover:border-primary/60',
     tagColor: 'bg-primary/10 text-primary border-primary/30',
@@ -18,11 +18,11 @@ const features = [
     iconBg: 'bg-primary/10',
   },
   {
-    icon: FlaskConical,
-    title: 'Digital Twin Simulation',
+    icon: TrendingUp,
+    title: 'SLA Forecasting',
     description:
-      'Test configuration changes safely in a virtual replica of your network topology before production deployment. Eliminate the risk of untested changes cascading into outages.',
-    tag: 'Digital Twin',
+      'Dual ensemble of TCN and BiLSTM models predicts future QoE classes and SLA breach risk windows from raw telemetry. Outputs per-window class probabilities and alert flags before breaches occur.',
+    tag: 'TCN · BiLSTM Ensemble',
     gradient: 'from-secondary/20 to-secondary/5',
     border: 'border-secondary/20 hover:border-secondary/60',
     tagColor: 'bg-secondary/10 text-secondary border-secondary/30',
@@ -30,11 +30,11 @@ const features = [
     iconBg: 'bg-secondary/10',
   },
   {
-    icon: Bot,
-    title: 'Autonomous Remediation',
+    icon: Zap,
+    title: 'Optimization Agent',
     description:
-      'Reduces manual intervention via a Reinforcement Learning agent that learns optimal remediation policies. Automatically suggests or applies topology-aware corrective actions.',
-    tag: 'Reinforcement Learning',
+      'LangGraph-orchestrated agent pipeline: ingests live telemetry, runs anomaly detection and SLA forecasting, then generates topology-aware remediation recommendations with full tool execution tracing.',
+    tag: 'LangGraph · Multi-model',
     gradient: 'from-accent/20 to-accent/5',
     border: 'border-accent/20 hover:border-accent/60',
     tagColor: 'bg-accent/10 text-accent border-accent/30',
@@ -42,11 +42,11 @@ const features = [
     iconBg: 'bg-accent/10',
   },
   {
-    icon: FileText,
-    title: 'Executive Reporting',
+    icon: MessageSquare,
+    title: 'RAG Chat Workspace',
     description:
-      'Generates business-ready executive summaries in under 2 minutes, bridging the technical-business communication gap. RAG-powered LLM translates raw metrics into actionable insights for stakeholders.',
-    tag: 'RAG / LLM',
+      'Qdrant-backed retrieval with hybrid dense and sparse search grounds every LLM response in your network documentation. Multi-turn chat with source citations, document ingestion, and thread persistence.',
+    tag: 'RAG · Qdrant · LLM',
     gradient: 'from-danger/20 to-danger/5',
     border: 'border-danger/20 hover:border-danger/60',
     tagColor: 'bg-danger/10 text-danger border-danger/30',
@@ -77,12 +77,12 @@ export default function Features() {
             Core Capabilities
           </span>
           <h2 className="text-3xl sm:text-4xl font-bold mb-4">
-            Four pillars of{' '}
-            <span className="text-gradient">intelligent operations</span>
+            The AI stack behind{' '}
+            <span className="text-gradient">QoSentry</span>
           </h2>
           <p className="text-muted max-w-2xl mx-auto">
-            QoSentry&apos;s AI stack covers the full lifecycle — from raw telemetry to executive
-            decision-making — in a unified platform.
+            From raw telemetry to remediation — anomaly detection, SLA forecasting, an orchestration
+            agent, and a RAG chat workspace working together in a unified platform.
           </p>
         </motion.div>
 
