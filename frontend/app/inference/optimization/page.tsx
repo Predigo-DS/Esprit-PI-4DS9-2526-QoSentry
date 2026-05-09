@@ -15,7 +15,7 @@ import {
   LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip,
   ResponsiveContainer, AreaChart, Area, ReferenceLine,
 } from 'recharts'
-import { isAuthenticated } from '@/lib/auth'
+import { isAuthenticated, getProfileRole } from '@/lib/auth'
 import {
   runMockOptimization, getTelemetryStatus, getLatestTelemetry,
   OptimizationResponse, ToolTraceEntry, getApiErrorMessage,
@@ -450,7 +450,7 @@ const POLL_PIPELINE_MS  = 60_000  // full AI pipeline — 60s to respect Groq fr
 export default function OptimizationPage() {
   const router = useRouter()
 
-  const [tab, setTab] = useState<'executive' | 'technical'>('executive')
+  const [profileRole, setProfileRole] = useState<'TECHNICAL' | 'EXECUTIVE'>('EXECUTIVE')
   const [bufferSize, setBufferSize] = useState(0)
   const [isLive, setIsLive] = useState(false)
   const [history, setHistory] = useState<TimePoint[]>([])
@@ -461,7 +461,7 @@ export default function OptimizationPage() {
   const [running, setRunning] = useState(false)
   const [lastRun, setLastRun] = useState<Date | null>(null)
   const [countdown, setCountdown] = useState(POLL_PIPELINE_MS / 1000)
-  const [pipelineDelayMs, setPipelineDelayMs] = useState(POLL_PIPELINE_MS)
+  const [, setPipelineDelayMs] = useState(POLL_PIPELINE_MS)
 
   const pipelineTimer = useRef<ReturnType<typeof setInterval> | null>(null)
   const countdownTimer = useRef<ReturnType<typeof setInterval> | null>(null)
@@ -470,7 +470,10 @@ export default function OptimizationPage() {
 
   // ── Auth guard ─────────────────────────────────────────────────────────────
   useEffect(() => {
-    if (!isAuthenticated()) router.push('/login')
+    if (!isAuthenticated()) { router.push('/login'); return }
+    const pr = getProfileRole()
+    if (pr === 'TECHNICAL') setProfileRole('TECHNICAL')
+    else setProfileRole('EXECUTIVE')
   }, [router])
 
   // ── Fetch telemetry status + raw rows ─────────────────────────────────────
@@ -702,19 +705,12 @@ export default function OptimizationPage() {
           <span className="text-muted text-sm">/ Optimization</span>
         </div>
 
-        {/* Tab switcher */}
-        <div className="ml-4 flex items-center gap-1 bg-surface rounded-lg p-1 border border-border">
-          {(['executive', 'technical'] as const).map(t => (
-            <button
-              key={t}
-              onClick={() => setTab(t)}
-              className={`px-4 py-1.5 rounded-md text-xs font-semibold transition-all capitalize ${
-                tab === t ? 'bg-primary text-white shadow' : 'text-muted hover:text-white'
-              }`}
-            >
-              {t === 'executive' ? '📊 Executive' : '⚙️ Technical'}
-            </button>
-          ))}
+        {/* Profile role badge */}
+        <div className="ml-4 flex items-center gap-2 px-3 py-1.5 rounded-lg bg-surface border border-border">
+          <span className="text-xs font-semibold text-muted">View:</span>
+          <span className={`text-xs font-bold ${profileRole === 'TECHNICAL' ? 'text-primary' : 'text-secondary'}`}>
+            {profileRole === 'TECHNICAL' ? '⚙️ Technical' : '📊 Executive'}
+          </span>
         </div>
 
         <div className="ml-auto flex items-center gap-4">
@@ -789,8 +785,8 @@ export default function OptimizationPage() {
 
       <main className={`max-w-7xl mx-auto px-6 py-8 ${!isLive ? 'hidden' : ''}`}>
 
-        {/* ── EXECUTIVE TAB ──────────────────────────────────────────────── */}
-        {tab === 'executive' && (
+        {/* ── EXECUTIVE VIEW ─────────────────────────────────────────────── */}
+        {profileRole === 'EXECUTIVE' && (
           <motion.div key="exec" initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} className="space-y-6">
 
             <div>
@@ -857,8 +853,8 @@ export default function OptimizationPage() {
           </motion.div>
         )}
 
-        {/* ── TECHNICAL TAB ──────────────────────────────────────────────── */}
-        {tab === 'technical' && (
+        {/* ── TECHNICAL VIEW ─────────────────────────────────────────────── */}
+        {profileRole === 'TECHNICAL' && (
           <motion.div key="tech" initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} className="space-y-6">
 
             <div className="flex items-center justify-between">
