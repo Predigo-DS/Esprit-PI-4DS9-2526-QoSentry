@@ -18,6 +18,13 @@
       "enabled": true,
       "description": "Local OpenAI-compatible endpoint (LM Studio, llama-swap, vLLM, Ollama)"
     },
+    "ollama": {
+      "display_name": "Ollama Local",
+      "base_url": "http://windows-host:11434/v1", 
+      "api_key_env": "OLLAMA_API_KEY",
+      "enabled": true,
+      "description": "Local Ollama models"
+    },
     "token_factory": {
       "display_name": "Token Factory",
       "base_url": "https://tokenfactory.esprit.tn/api",

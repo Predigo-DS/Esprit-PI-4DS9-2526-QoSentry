@@ -5,7 +5,11 @@ from typing import Optional, List, Dict, Any
 from fastapi import FastAPI, HTTPException, UploadFile, File, Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from embeddings import get_embedder, download_progress
+from embeddings import (
+    get_inference_embedder,
+    get_ingest_embedder,
+    download_progress,
+)
 from vector_store import VectorStoreClient
 from contextlib import asynccontextmanager
 from dotenv import load_dotenv
@@ -30,6 +34,7 @@ warmup_state = {
     "last_error": None,
 }
 warmup_lock = asyncio.Lock()
+ingest_lock = asyncio.Lock()
 
 init_state = {
     "status": "idle",  # idle | loading | ready | error
@@ -75,7 +80,7 @@ async def _init_models():
         init_state["last_error"] = None
 
         try:
-            embedder = await asyncio.to_thread(get_embedder)
+            embedder = await asyncio.to_thread(get_inference_embedder)
             models["embedder"] = embedder
         except Exception as e:
             init_state["status"] = "error"
@@ -117,6 +122,13 @@ async def _init_models():
         warmup_state["status"] = "idle"
         warmup_state["last_error"] = None
         asyncio.create_task(_run_warmup())
+
+
+async def _get_ingest_embedder():
+    async with ingest_lock:
+        if "ingest_embedder" not in models:
+            models["ingest_embedder"] = await asyncio.to_thread(get_ingest_embedder)
+    return models["ingest_embedder"]
 
 
 @asynccontextmanager
@@ -277,6 +289,7 @@ async def ingest_file(file: UploadFile = File(...)):
 async def ingest_batch(req: BatchIngestRequest):
     _require_ready()
     try:
+        ingest_embedder = await _get_ingest_embedder()
         total = len(req.documents)
         ingested = 0
         chunks = 0
@@ -286,7 +299,7 @@ async def ingest_batch(req: BatchIngestRequest):
         for idx, doc in enumerate(req.documents):
             try:
                 result = models["vs"].ingest_text_with_details(
-                    doc.text, doc.metadata, models["embedder"]
+                    doc.text, doc.metadata, ingest_embedder
                 )
                 ingested += 1
                 chunks += result["chunks_created"]

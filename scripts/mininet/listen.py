@@ -216,7 +216,7 @@ class TelecomQoEListener:
 
         # ---- Redis & CSV setup -------------------------------------------
         self.redis = redis.Redis(
-            host='192.168.1.114', port=6379, db=0, decode_responses=True, password=REDIS_PWD)
+            host='10.230.232.213', port=6379, db=0, decode_responses=True, password=REDIS_PWD)
         self._setup_csv()
         signal.signal(signal.SIGINT, self._on_exit)
 

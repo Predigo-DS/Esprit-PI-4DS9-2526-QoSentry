@@ -24,6 +24,7 @@ public class DataInitializer implements CommandLineRunner {
                     .email("admin@qosentry.com")
                     .password(passwordEncoder.encode("Admin@123"))
                     .role(User.Role.ADMIN)
+                    .profileRole(User.ProfileRole.TECHNICAL)
                     .build();
             userRepository.save(admin);
             log.info("Default admin account created — username: admin / password: Admin@123");

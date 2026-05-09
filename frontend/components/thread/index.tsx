@@ -872,7 +872,7 @@ footer={
                   <div
                     ref={dropRef}
                     className={cn(
-                      "relative z-10 mx-auto mb-8 w-full max-w-4xl overflow-hidden rounded-3xl border border-border/70 bg-surface/85 shadow-[0_22px_60px_rgba(2,6,23,0.55)] backdrop-blur transition-all",
+                      "relative z-10 mx-auto mb-8 w-full max-w-4xl rounded-3xl border border-border/70 bg-surface/85 shadow-[0_22px_60px_rgba(2,6,23,0.55)] backdrop-blur transition-all",
                       dragOver
                         ? "border-primary border-2 border-dotted"
                         : "",

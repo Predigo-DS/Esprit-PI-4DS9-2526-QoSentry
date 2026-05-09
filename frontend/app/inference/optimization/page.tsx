@@ -445,7 +445,7 @@ function ToolTraceCard({ entry }: { entry: ToolTraceEntry }) {
 // ─── Main page ───────────────────────────────────────────────────────────────
 
 const POLL_TELEMETRY_MS = 3_000   // status + raw rows
-const POLL_PIPELINE_MS  = 30_000  // full AI pipeline — 30s to respect Groq free-tier rate limits
+const POLL_PIPELINE_MS  = 60_000  // full AI pipeline — 60s to respect Groq free-tier rate limits
 
 export default function OptimizationPage() {
   const router = useRouter()

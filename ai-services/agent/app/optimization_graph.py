@@ -144,7 +144,8 @@ BOUND_TOOLS = [
     decision_summary_tool,
 ]
 
-OPTIMIZATION_SYSTEM_PROMPT = """You are an autonomous SDN optimization agent for a Mininet telecom testbed.
+OPTIMIZATION_SYSTEM_PROMPT = """/no_think
+You are an autonomous SDN optimization agent for a Mininet telecom testbed.
 
 == NETWORK TOPOLOGY ==
 Core switch : s1
@@ -268,36 +269,43 @@ def input_validation_node(state: OptimizationState) -> dict:
         alert_lines.append(f"  ⚠ POOR VOICE QUALITY: MOS={mos:.2f}")
 
     alerts_str = "\n".join(alert_lines) if alert_lines else "  ✓ No active alerts"
+    # Clean up results aggressively to stay under Groq's small TPM limits
+    # Stripping all large lists and truncating context
+    clean_anomaly = {k: v for k, v in anomaly.items() if k not in ["windows", "rows", "full_trace", "segments_data"]}
+    clean_sla = {k: v for k, v in sla.items() if k not in ["predictions", "rows", "full_trace", "segments_data"]}
+
+    # Truncate context to 1000 chars max
+    safe_context = (str(context)[:1000] + "...") if len(str(context)) > 1000 else context
 
     summary = f"""NETWORK OPTIMIZATION REQUEST
-Device: {device}
-Context: {context}
+    Device: {device}
+    Context: {safe_context}
+    ...
+    === ACTIVE ALERTS ===
+    {alerts_str}
 
-=== ACTIVE ALERTS ===
-{alerts_str}
+    === KEY METRICS (30s avg) ===
+    Packet Loss Rate  : {plr:.4f} ({plr*100:.2f}%)
+    E2E Delay         : {delay:.1f} ms
+    Jitter            : {jitter:.1f} ms
+    Voice MOS         : {mos:.2f}
+    Streaming MOS     : {streaming_mos:.2f}
+    Dataplane Latency : {dp_latency:.1f} ms
+    RX Dropped        : {rx_dropped:.0f} packets
+    Throughput        : {throughput:.2f} Mbps
 
-=== KEY METRICS (30s avg) ===
-  Packet Loss Rate  : {plr:.4f} ({plr*100:.2f}%)
-  E2E Delay         : {delay:.1f} ms
-  Jitter            : {jitter:.1f} ms
-  Voice MOS         : {mos:.2f}
-  Streaming MOS     : {streaming_mos:.2f}
-  Dataplane Latency : {dp_latency:.1f} ms
-  RX Dropped        : {rx_dropped:.0f} packets
-  Throughput        : {throughput:.2f} Mbps
+    === ANOMALY DETECTION RESULT ===
+    {json.dumps(clean_anomaly, default=str)}
 
-=== ANOMALY DETECTION RESULT ===
-{json.dumps(anomaly, default=str)}
+    === SLA FORECASTING RESULT ===
+    {json.dumps(clean_sla, default=str)}
 
-=== SLA FORECASTING RESULT ===
-{json.dumps(sla, default=str)}
-
-Based on the above, take the appropriate remediation action now.
-"""
+    Based on the above, take the appropriate remediation action now.
+    """
     messages = [
-        SystemMessage(content=OPTIMIZATION_SYSTEM_PROMPT),
-        HumanMessage(content=summary),
-    ]
+            SystemMessage(content=OPTIMIZATION_SYSTEM_PROMPT),
+            HumanMessage(content=summary),
+        ]
     return {"messages": messages, "tool_trace": []}
 
 
@@ -432,7 +440,7 @@ def build_optimization_graph(base_url: str, api_key: str | None = None, model: s
         model=model,
         base_url=base_url,
         api_key=api_key or "unused",
-        temperature=0.2,
+        temperature=0.6,
     )
     llm_with_tools = llm.bind_tools(BOUND_TOOLS)
 

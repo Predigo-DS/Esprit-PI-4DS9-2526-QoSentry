@@ -3,6 +3,11 @@ import sys
 from sentence_transformers import SentenceTransformer
 from dotenv import load_dotenv
 
+try:
+    import torch
+except Exception:
+    torch = None
+
 # --- Monkeypatch huggingface_hub for download progress tracking ---
 from tqdm.auto import tqdm
 import huggingface_hub.utils
@@ -39,16 +44,39 @@ if hasattr(huggingface_hub.utils, 'tqdm'):
 
 load_dotenv()
 
-_embedder = None
+_embedder_cache: dict[str, SentenceTransformer] = {}
 
 
-def get_embedder() -> SentenceTransformer:
-    global _embedder
-    if _embedder is None:
+def _normalize_device(device: str | None) -> str:
+    requested = (device or "cpu").strip().lower()
+    if requested == "gpu" or requested.startswith("cuda"):
+        if torch is not None and torch.cuda.is_available():
+            return "cuda" if requested == "gpu" else requested
+        print("GPU embedding requested but CUDA is unavailable; falling back to CPU.", flush=True)
+        sys.stdout.flush()
+        return "cpu"
+    return "cpu"
+
+
+def get_embedder(device: str | None = None) -> SentenceTransformer:
+    normalized_device = _normalize_device(device)
+    if normalized_device not in _embedder_cache:
         model_name = os.getenv("EMBEDDING_MODEL", "Qwen/Qwen3-Embedding-0.6B")
-        print(f"Loading embedding model on CPU...", flush=True)
+        print(f"Loading embedding model on {normalized_device.upper()}...", flush=True)
         sys.stdout.flush()
-        _embedder = SentenceTransformer(model_name, trust_remote_code=True, device="cpu")
-        print(f"Embedding model loaded on CPU", flush=True)
+        _embedder_cache[normalized_device] = SentenceTransformer(
+            model_name,
+            trust_remote_code=True,
+            device=normalized_device,
+        )
+        print(f"Embedding model loaded on {normalized_device.upper()}", flush=True)
         sys.stdout.flush()
-    return _embedder
+    return _embedder_cache[normalized_device]
+
+
+def get_inference_embedder() -> SentenceTransformer:
+    return get_embedder(os.getenv("EMBEDDING_INFERENCE_DEVICE", "cpu"))
+
+
+def get_ingest_embedder() -> SentenceTransformer:
+    return get_embedder(os.getenv("EMBEDDING_INGEST_DEVICE", "cuda"))

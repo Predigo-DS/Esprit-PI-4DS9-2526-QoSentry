@@ -9,9 +9,9 @@ services:
     image: postgres:16
     container_name: qos-postgres
     environment:
-      - POSTGRES_DB=${POSTGRES_DB}
-      - POSTGRES_USER=${POSTGRES_USER}
-      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - POSTGRES_DB=qosbuddy
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=postgres
     ports:
       - "5432:5432"
     volumes:
@@ -104,11 +104,15 @@ services:
       - CHECKPOINT_DB_URI=postgresql://postgres:postgres@postgres:5432/qosbuddy
       - GROQ_API_KEY=${GROQ_API_KEY:-}
       - LOCAL_OPENAI_API_KEY=${LOCAL_OPENAI_API_KEY:-}
+      - OLLAMA_API_KEY=dummy-key-for-ollama
       - TOKEN_FACTORY_API_KEY=${TOKEN_FACTORY_API_KEY:-}
       - ACTION_REDIS_URL=redis://qosentry-redis:6379
-      - MININET_API_URL=http://192.168.1.114:8000
+      - MININET_API_URL=http://10.230.232.213:8000
+      - OLLAMA_BASE_URL=http://${WINDOWS_HOST_IP}:11434
     extra_hosts:
-      - "mininet-vm:192.168.1.114"
+      - "mininet-vm:192.168.1.104"
+      - "host.docker.internal:host-gateway"
+      - "windows-host:${WINDOWS_HOST_IP}"
 
     volumes:
       - ./ai-services/agent/app:/app

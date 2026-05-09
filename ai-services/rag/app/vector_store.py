@@ -258,7 +258,12 @@ class VectorStoreClient:
 
         return result
 
-    def _semantic_split(self, text: str, threshold: float = 0.75) -> list[str]:
+    def _semantic_split(
+        self,
+        text: str,
+        threshold: float = 0.75,
+        embedder=None,
+    ) -> list[str]:
         """Chunk text by semantic similarity using embeddings (no LLM needed).
 
         Algorithm:
@@ -267,7 +272,8 @@ class VectorStoreClient:
         3. Preserve code blocks as atomic units, merge to adjacent chunks
         4. Handle very long code blocks with fallback splitter
         """
-        if not self.embedder:
+        embedder = embedder or self.embedder
+        if not embedder:
             return []
 
         segments = self._split_into_segments(text)
@@ -288,7 +294,7 @@ class VectorStoreClient:
                 else:
                     code_blocks.append(seg_content)
             else:
-                prose_chunks = self._chunk_prose(seg_content, threshold)
+                prose_chunks = self._chunk_prose(seg_content, threshold, embedder)
                 chunks.extend(prose_chunks)
 
         if not chunks and not code_blocks:
@@ -301,7 +307,7 @@ class VectorStoreClient:
 
         return [c.strip() for c in chunks if c.strip()]
 
-    def _chunk_prose(self, prose: str, threshold: float) -> list[str]:
+    def _chunk_prose(self, prose: str, threshold: float, embedder) -> list[str]:
         """Apply semantic chunking to a prose segment."""
         sentences = re.split(r'(?<=[.!?])\s+', prose.strip())
         sentences = [s.strip() for s in sentences if s.strip()]
@@ -321,7 +327,7 @@ class VectorStoreClient:
         embeddings = []
         for i in range(0, len(sentences), batch_size):
             batch = sentences[i:i + batch_size]
-            emb = self.embedder.encode(batch, show_progress_bar=False)
+            emb = embedder.encode(batch, show_progress_bar=False)
             embeddings.extend(emb.tolist())
 
         embeddings = np.array(embeddings)
@@ -415,7 +421,7 @@ class VectorStoreClient:
 
         # Use semantic chunking (falls back to recursive if embedder unavailable)
         try:
-            chunks = self._semantic_split(text)
+            chunks = self._semantic_split(text, embedder=embedder)
         except Exception:
             splitter = RecursiveCharacterTextSplitter(
                 chunk_size=CHUNK_SIZE, chunk_overlap=CHUNK_OVERLAP
@@ -497,7 +503,7 @@ class VectorStoreClient:
 
         # Use semantic chunking (falls back to recursive if embedder unavailable)
         try:
-            chunks = self._semantic_split(text)
+            chunks = self._semantic_split(text, embedder=embedder)
         except Exception:
             splitter = RecursiveCharacterTextSplitter(
                 chunk_size=CHUNK_SIZE, chunk_overlap=CHUNK_OVERLAP
