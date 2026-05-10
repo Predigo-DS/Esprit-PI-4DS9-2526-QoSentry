@@ -108,11 +108,11 @@ services:
       - TOKEN_FACTORY_API_KEY=${TOKEN_FACTORY_API_KEY:-}
       - ACTION_REDIS_URL=redis://qosentry-redis:6379
       - MININET_API_URL=http://10.230.232.213:8000
-      - OLLAMA_BASE_URL=http://${WINDOWS_HOST_IP}:11434
+      - OLLAMA_BASE_URL=http://${WINDOWS_HOST_IP:-127.0.0.1}:11434
     extra_hosts:
       - "mininet-vm:192.168.1.104"
       - "host.docker.internal:host-gateway"
-      - "windows-host:${WINDOWS_HOST_IP}"
+      - "windows-host:${WINDOWS_HOST_IP:-127.0.0.1}"
 
     volumes:
       - ./ai-services/agent/app:/app
