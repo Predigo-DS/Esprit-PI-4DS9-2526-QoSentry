@@ -16,8 +16,31 @@ from langgraph.graph import END, StateGraph
 MININET_API_URL = os.getenv("MININET_API_URL", "http://192.168.249.132:8000")
 
 
+_UNICODE_REPLACEMENTS = str.maketrans({
+    "—": "--",   # em dash
+    "–": "-",    # en dash
+    "‘": "'",    # left single quote
+    "’": "'",    # right single quote
+    "“": '"',    # left double quote
+    "”": '"',    # right double quote
+    "…": "...",  # ellipsis
+    "·": "-",    # middle dot
+})
+
+def _sanitize(value: object) -> object:
+    """Recursively replace LLM Unicode punctuation with ASCII equivalents."""
+    if isinstance(value, str):
+        return value.translate(_UNICODE_REPLACEMENTS).encode("ascii", errors="replace").decode("ascii")
+    if isinstance(value, dict):
+        return {k: _sanitize(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_sanitize(v) for v in value]
+    return value
+
+
 def _send_action(payload: dict) -> dict:
     """POST action to the FastAPI SDN executor running inside the Mininet VM."""
+    payload = _sanitize(payload)
     payload["timestamp"] = time.time()
     url = MININET_API_URL.rstrip("/") + "/action"
     try:
@@ -95,7 +118,10 @@ def monitor_only(device: str, reason: str = "") -> dict:  # noqa: F811
 def decision_summary_tool(decision_summary: str, recommended_actions: list, confidence: str, risk_level: str) -> dict:
     """REQUIRED: Call this tool LAST to submit your final structured decision after all actions are complete.
     Args:
-        decision_summary: One sentence describing what was done and why.
+        decision_summary: EXACTLY 1-2 plain sentences. No markdown, no bullet points, no analysis.
+            Sentence 1: What network problem was detected (metric value + interface name).
+            Sentence 2: What action was taken and on which interface.
+            Example: "Packet loss spike (8.2%) detected on INDOOR_RAN (s1-eth2). Applied throttle_link to s1-eth2 to relieve congestion."
         recommended_actions: List of action strings taken or recommended.
         confidence: Your confidence score between 0.0 and 1.0 as a string, e.g. "0.85".
         risk_level: Current risk level: low, medium, high, or critical.
@@ -179,12 +205,12 @@ PROCESS:
   Step 2 -- call your chosen action tool(s), ONE at a time, following the selection rules above
   Step 3 -- call decision_summary_tool with your reasoning
 
-In decision_summary, always mention:
-  - which scenario you identified and why (which metric was the evidence)
-  - which specific interface(s) are affected (e.g., s1-eth2)
-  - what action you took, why that tool was chosen, and on which interface
-  - confidence: float 0.0-1.0
-  - risk_level: low / medium / high / critical
+In decision_summary write EXACTLY 1-2 plain sentences (no markdown, no bullet points):
+  Sentence 1: What network problem was detected — include the specific metric value and interface name.
+  Sentence 2: What action was taken and on which interface.
+  BAD:  "Let me analyze… Step 1… MANDATORY… the avg_plr of 2.71% is slightly above…"
+  GOOD: "Packet loss spike (8.2%) detected on INDOOR_RAN (s1-eth2). Applied throttle_link to s1-eth2 to relieve congestion."
+  GOOD: "All metrics within normal range — no degradation detected. No remediation action taken."
 """
 
 # ──────────────────────────────────────────
@@ -348,9 +374,13 @@ def final_decision_node(state: OptimizationState) -> dict:
                 # Use LLM's risk_level if provided, otherwise compute from metrics
                 llm_risk = result.get("risk_level")
                 risk_level = str(llm_risk) if llm_risk and llm_risk != "medium" else _compute_risk_from_metrics(avg_metrics)
+                raw_actions = result.get("recommended_actions", [])
                 return {"decision_output": {
                     "decision_summary": result.get("decision_summary", ""),
-                    "recommended_actions": result.get("recommended_actions", []),
+                    "recommended_actions": [
+                        a if isinstance(a, str) else json.dumps(a)
+                        for a in raw_actions
+                    ],
                     "confidence": float(result.get("confidence", 0.5)),
                     "risk_level": risk_level,
                 }}
@@ -366,8 +396,16 @@ def final_decision_node(state: OptimizationState) -> dict:
     # Compute risk from actual metrics instead of defaulting to "medium"
     computed_risk = _compute_risk_from_metrics(avg_metrics)
 
+    # Truncate raw AI message to first 2 sentences — it may contain full chain-of-thought
+    def _truncate(text: str, max_sentences: int = 2) -> str:
+        sentences = [s.strip() for s in text.split('.') if s.strip()]
+        truncated = '. '.join(sentences[:max_sentences])
+        return truncated + '.' if truncated else text
+
+    fallback_summary = _truncate(last_ai) if last_ai else "No decision produced."
+
     decision = {
-        "decision_summary": last_ai or "No decision produced.",
+        "decision_summary": fallback_summary,
         "recommended_actions": [],
         "confidence": 0.5,
         "risk_level": computed_risk,
@@ -393,6 +431,11 @@ def final_decision_node(state: OptimizationState) -> dict:
 # ──────────────────────────────────────────
 
 def should_call_tools(state: OptimizationState) -> str:
+    # Circuit breaker: once decision_summary_tool has been called, finalize immediately
+    tool_trace = state.get("tool_trace") or []
+    if any(e.get("tool") == "decision_summary_tool" for e in tool_trace):
+        return "finalize"
+
     messages = state["messages"]
     last_msg = messages[-1] if messages else None
     if last_msg and hasattr(last_msg, "tool_calls") and last_msg.tool_calls:

@@ -74,7 +74,7 @@ public class AiInferenceServiceImpl implements AiInferenceService {
         // Step 1: anomaly detection — strip string fields, service only accepts numeric values
         AnomalyInferenceRequestDto anomalyReq = AnomalyInferenceRequestDto.builder()
                 .rows(buildNumericOnlyRows(rows))
-                .stride(1)
+                .stride(null)  // null → service defaults to window_size (non-overlapping windows)
                 .thresholdName("best")
                 .build();
         JsonNode anomalyResult = callWithMockFallback(

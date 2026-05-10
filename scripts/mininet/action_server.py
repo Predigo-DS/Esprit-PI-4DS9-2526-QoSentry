@@ -12,7 +12,12 @@ Uses the same tc/netem mechanism as traffic_gen.py to reduce packet loss.
 
 import re
 import subprocess
+import sys
 from typing import Optional
+
+# Mininet VM terminals default to Latin-1; LLM output often contains Unicode (em dashes etc.)
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel

@@ -716,16 +716,19 @@ async def optimization_respond(req: OptimizationRequest):
             )
 
         opt_graph = app.state.optimization_graph
-        result = await opt_graph.ainvoke({
-            "anomaly_result": req.anomaly_result or {},
-            "sla_result": req.sla_result or {},
-            "avg_30s": req.avg_30s,
-            "device": req.device or "unknown",
-            "context": req.context or "",
-            "messages": [],
-            "tool_trace": [],
-            "decision_output": {},
-        })
+        result = await opt_graph.ainvoke(
+            {
+                "anomaly_result": req.anomaly_result or {},
+                "sla_result": req.sla_result or {},
+                "avg_30s": req.avg_30s,
+                "device": req.device or "unknown",
+                "context": req.context or "",
+                "messages": [],
+                "tool_trace": [],
+                "decision_output": {},
+            },
+            {"recursion_limit": 50},
+        )
 
         decision = result.get("decision_output") or {}
         tool_trace = result.get("tool_trace") or []

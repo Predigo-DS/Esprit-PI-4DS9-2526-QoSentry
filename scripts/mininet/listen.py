@@ -216,7 +216,7 @@ class TelecomQoEListener:
 
         # ---- Redis & CSV setup -------------------------------------------
         self.redis = redis.Redis(
-            host='10.230.232.213', port=6379, db=0, decode_responses=True, password=REDIS_PWD)
+            host='192.168.1.109', port=6379, db=0, decode_responses=True, password=REDIS_PWD)
         self._setup_csv()
         signal.signal(signal.SIGINT, self._on_exit)
 
@@ -571,7 +571,7 @@ class TelecomQoEListener:
                 'rx_dropped': port_row['rx_dropped'],
                 'tx_dropped': port_row['tx_dropped'],
                 # NEW v2 columns
-                'dataplane_latency_ms': round(dp_lat, 3) if dp_lat is not None else '',
+                'dataplane_latency_ms': round(dp_lat, 3) if dp_lat is not None else None,
                 'ctrl_plane_rtt_ms':    round(ctrl_rtt, 3),
                 'flow_count':           flow_count,
                 'mos_source':           mos_src,

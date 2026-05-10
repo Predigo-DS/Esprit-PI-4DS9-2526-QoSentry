@@ -151,13 +151,42 @@ function AiSummaryCard({
   decision,
   isMock,
   errorMessage,
+  toolTrace,
+  avgMetrics,
+  anomalyResult,
+  slaResult,
 }: {
   decision: OptimizationResponse['optimization_decision']
   isMock: boolean
   errorMessage?: string | null
+  toolTrace: ToolTraceEntry[]
+  avgMetrics: Record<string, number>
+  anomalyResult: Record<string, unknown>
+  slaResult: Record<string, unknown>
 }) {
-  const summary = decision?.decision_summary ?? 'No AI insight available.'
-  const actions = decision?.recommended_actions ?? []
+  const [showDetails, setShowDetails] = useState(false)
+  const summary = (() => {
+    const raw = decision?.decision_summary ?? 'No AI insight available.'
+    const sentences = raw.split(/\.(?:\s|$)/).map(s => s.trim()).filter(Boolean)
+    const capped = sentences.length > 2 ? sentences.slice(0, 2).join('. ') + '.' : raw
+    return capped
+  })()
+  const actions     = decision?.recommended_actions ?? []
+  const confidence  = decision?.confidence as number ?? 0
+  const riskLevel   = decision?.risk_level as string ?? 'unknown'
+  const actionTools = toolTrace.filter(t => t.tool !== 'decision_summary_tool')
+  const riskColor   = riskLevel === 'critical' ? 'text-red-400'
+                    : riskLevel === 'high'     ? 'text-orange-400'
+                    : riskLevel === 'medium'   ? 'text-amber-400'
+                    : 'text-emerald-400'
+
+  // Detection summary for technical section
+  const anomalyDetected  = anomalyResult?.anomaly_detected === true || (Number(anomalyResult?.anomaly_windows) > 0)
+  const anomalyScore     = anomalyResult?.anomaly_score ?? anomalyResult?.anomaly_windows ?? null
+  const anomalyScenario  = anomalyResult?.scenario as string | undefined
+  const slaAlert         = slaResult?.sla_alert === true || (Number(slaResult?.alert_count) > 0)
+  const slaViolProb      = slaResult?.sla_violation_probability ?? slaResult?.alert_rate ?? null
+
   return (
     <div className="glass rounded-2xl border border-border p-6">
       <div className="flex items-center gap-2 mb-4">
@@ -192,11 +221,121 @@ function AiSummaryCard({
           )}
           {actions.length > 0 && (
             <div className="mt-3 flex flex-wrap gap-2">
-              {actions.slice(0, 3).map((a: string, i: number) => (
-                <span key={i} className="text-xs px-3 py-1 rounded-full bg-primary/10 border border-primary/30 text-primary">
-                  {a}
-                </span>
-              ))}
+              {actions.slice(0, 3).map((a: string, i: number) => {
+                let parsed: Record<string, string> | null = null
+                try { parsed = JSON.parse(a) } catch { /* plain string */ }
+                if (parsed && typeof parsed === 'object' && parsed.action) {
+                  const label = parsed.action.replace(/_/g, ' ')
+                  const detail = parsed.profile ?? parsed.path ?? parsed.interface ?? ''
+                  return (
+                    <span key={i} className="text-xs px-3 py-1.5 rounded-full bg-primary/10 border border-primary/30 text-primary font-medium">
+                      {label}{detail ? <span className="text-primary/60 font-normal"> · {detail}</span> : null}
+                    </span>
+                  )
+                }
+                return (
+                  <span key={i} className="text-xs px-3 py-1 rounded-full bg-primary/10 border border-primary/30 text-primary">
+                    {a}
+                  </span>
+                )
+              })}
+            </div>
+          )}
+
+          {/* Technical details toggle */}
+          <button
+            onClick={() => setShowDetails(v => !v)}
+            className="mt-3 flex items-center gap-1 text-[11px] text-muted hover:text-white transition-colors"
+          >
+            <ChevronDown className={`w-3 h-3 transition-transform ${showDetails ? 'rotate-180' : ''}`} />
+            {showDetails ? 'Hide' : 'Show'} technical details
+          </button>
+
+          {showDetails && (
+            <div className="mt-3 pt-3 border-t border-border/30 space-y-4">
+
+              {/* Risk + Confidence row */}
+              <div className="flex items-center gap-6 text-xs">
+                <span className="text-muted">Risk: <span className={`ml-1 font-bold uppercase ${riskColor}`}>{riskLevel}</span></span>
+                <span className="text-muted">Confidence: <span className="ml-1 text-white font-mono">{(confidence * 100).toFixed(0)}%</span></span>
+              </div>
+
+              {/* What was detected */}
+              <div>
+                <p className="text-[10px] font-bold text-muted uppercase tracking-wider mb-2">What Was Detected</p>
+                <div className="grid grid-cols-2 gap-1.5">
+                  <div className={`rounded-lg p-2.5 border ${anomalyDetected ? 'bg-red-500/10 border-red-500/30' : 'bg-emerald-500/10 border-emerald-500/20'}`}>
+                    <p className="text-[9px] font-bold uppercase text-muted mb-1">Anomaly Model</p>
+                    <p className={`text-xs font-semibold ${anomalyDetected ? 'text-red-300' : 'text-emerald-400'}`}>
+                      {anomalyDetected ? 'ANOMALY DETECTED' : 'Normal'}
+                    </p>
+                    {anomalyScore !== null && (
+                      <p className="text-[10px] text-muted mt-0.5 font-mono">score: {String(anomalyScore)}</p>
+                    )}
+                    {anomalyScenario && (
+                      <p className="text-[10px] text-muted mt-0.5">{anomalyScenario}</p>
+                    )}
+                  </div>
+                  <div className={`rounded-lg p-2.5 border ${slaAlert ? 'bg-amber-500/10 border-amber-500/30' : 'bg-emerald-500/10 border-emerald-500/20'}`}>
+                    <p className="text-[9px] font-bold uppercase text-muted mb-1">SLA Forecast</p>
+                    <p className={`text-xs font-semibold ${slaAlert ? 'text-amber-300' : 'text-emerald-400'}`}>
+                      {slaAlert ? 'VIOLATION FORECAST' : 'On Track'}
+                    </p>
+                    {slaViolProb !== null && (
+                      <p className="text-[10px] text-muted mt-0.5 font-mono">
+                        prob: {typeof slaViolProb === 'number' ? (slaViolProb * 100).toFixed(0) + '%' : String(slaViolProb)}
+                      </p>
+                    )}
+                  </div>
+                </div>
+              </div>
+
+              {/* Trigger metrics grid */}
+              {Object.keys(avgMetrics).length > 0 && (() => {
+                const KEYS = ['plr','e2e_delay_ms','mos_voice','throughput_mbps','jitter_ms','dns_latency_ms'] as const
+                const LABELS: Record<string, string> = { plr:'PLR', e2e_delay_ms:'E2E Delay', mos_voice:'MOS', throughput_mbps:'Throughput', jitter_ms:'Jitter', dns_latency_ms:'DNS' }
+                const UNITS:  Record<string, string> = { plr:'%',   e2e_delay_ms:'ms',         mos_voice:'',    throughput_mbps:'Mbps',       jitter_ms:'ms',     dns_latency_ms:'ms'  }
+                // Thresholds for highlighting degraded metrics
+                const THRESH: Record<string, (v: number) => boolean> = {
+                  plr: v => v > 0.05, e2e_delay_ms: v => v > 100, mos_voice: v => v > 0 && v < 3.0,
+                  throughput_mbps: v => v < 5, jitter_ms: v => v > 30, dns_latency_ms: v => v > 100,
+                }
+                const visible = KEYS.filter(k => avgMetrics[k] !== undefined)
+                if (!visible.length) return null
+                return (
+                  <div>
+                    <p className="text-[10px] font-bold text-muted uppercase tracking-wider mb-2">Telemetry Snapshot (30s avg)</p>
+                    <div className="grid grid-cols-3 gap-1.5">
+                      {visible.map(k => {
+                        const v = avgMetrics[k]
+                        const degraded = THRESH[k]?.(v) ?? false
+                        const display = k === 'plr' ? (v * 100).toFixed(2) : v.toFixed(k === 'mos_voice' ? 2 : 1)
+                        return (
+                          <div key={k} className={`rounded-lg p-2 border ${degraded ? 'bg-red-500/10 border-red-500/25' : 'bg-surface/50 border-transparent'}`}>
+                            <p className="text-[9px] text-muted uppercase">{LABELS[k]}</p>
+                            <p className={`text-xs font-mono ${degraded ? 'text-red-300 font-bold' : 'text-white'}`}>{display}{UNITS[k]}</p>
+                          </div>
+                        )
+                      })}
+                    </div>
+                  </div>
+                )
+              })()}
+
+              {/* What was done */}
+              {actionTools.length > 0 && (
+                <div>
+                  <p className="text-[10px] font-bold text-muted uppercase tracking-wider mb-2">
+                    What Was Done ({actionTools.length} action{actionTools.length !== 1 ? 's' : ''})
+                  </p>
+                  <div className="space-y-1.5">
+                    {actionTools.map((t, i) => <ToolTraceCard key={i} entry={t} />)}
+                  </div>
+                </div>
+              )}
+              {actionTools.length === 0 && (
+                <p className="text-[11px] text-muted italic">No remediation actions taken this cycle.</p>
+              )}
             </div>
           )}
         </div>
@@ -453,6 +592,13 @@ interface MetricsSnapshot {
   throughput_mbps: number
 }
 
+interface AnomalyEvent {
+  detectedAt: number
+  resolvedAt: number | null
+  peakScore: number
+  windowCount: number
+}
+
 function DeltaBadge({ before, after, lowerIsBetter = true }: { before: number; after: number; lowerIsBetter?: boolean }) {
   if (before === 0 && after === 0) return <Minus className="w-3 h-3 text-muted" />
   const delta = after - before
@@ -491,19 +637,19 @@ function BeforeAfterPanel({
           <ArrowRight className="w-4 h-4 text-primary" />
         </div>
         <div>
-          <h3 className="text-sm font-bold text-white">Before / After Remediation</h3>
+          <h3 className="text-sm font-bold text-white">Anomaly Impact</h3>
           <p className="text-xs text-muted">
-            {after ? 'Agent remediation applied — metrics recovered' : awaitingAfter ? 'Waiting for next pipeline run to confirm recovery…' : 'Agent intervention detected'}
+            {after ? 'Anomaly resolved — metrics recovered' : awaitingAfter ? 'Anomaly active — awaiting resolution…' : 'Anomaly detected'}
           </p>
         </div>
         {awaitingAfter && !after && (
           <span className="ml-auto flex items-center gap-1.5 text-xs text-amber-400">
-            <RefreshCw className="w-3 h-3 animate-spin" /> Awaiting next pipeline run…
+            <RefreshCw className="w-3 h-3 animate-spin" /> Monitoring recovery…
           </span>
         )}
         {after && (
           <span className="ml-auto text-xs px-2 py-0.5 rounded-full bg-emerald-400/10 border border-emerald-400/30 text-emerald-400 font-bold">
-            ✓ Remediation complete
+            ✓ Resolved
           </span>
         )}
       </div>
@@ -559,7 +705,7 @@ function BeforeAfterPanel({
 // ─── Main page ───────────────────────────────────────────────────────────────
 
 const POLL_TELEMETRY_MS = 3_000   // status + raw rows
-const POLL_PIPELINE_MS  = 60_000  // full AI pipeline — 60s to respect Groq free-tier rate limits
+const POLL_PIPELINE_MS  = 30_000  // full AI pipeline — 30s cycle
 
 export default function OptimizationPage() {
   const router = useRouter()
@@ -584,11 +730,17 @@ export default function OptimizationPage() {
   const [afterSnapshot, setAfterSnapshot]       = useState<MetricsSnapshot | null>(null)
   const [awaitingAfter, setAwaitingAfter]       = useState(false)
 
+  // ── Anomaly event timeline state ──────────────────────────────────────────
+  const [anomalyEvents, setAnomalyEvents]       = useState<AnomalyEvent[]>([])
+  const anomalyEventsRef  = useRef<AnomalyEvent[]>([])
+  const activeAnomalyRef  = useRef<AnomalyEvent | null>(null)
+
   const pipelineTimer = useRef<ReturnType<typeof setInterval> | null>(null)
   const countdownTimer = useRef<ReturnType<typeof setInterval> | null>(null)
   const telemetryTimer = useRef<ReturnType<typeof setInterval> | null>(null)
-  const pipelineDelayRef = useRef(POLL_PIPELINE_MS)
-  const awaitingAfterRef = useRef(false)
+  const pipelineDelayRef       = useRef(POLL_PIPELINE_MS)
+  const awaitingAfterRef       = useRef(false)
+  const awaitingAfterCyclesRef = useRef(0)
 
   // Stable refs for latest metric values (used in scenario snapshot callback)
   const currentPlrRef   = useRef(0)
@@ -665,20 +817,45 @@ export default function OptimizationPage() {
         throughput_mbps: avgM2.throughput_mbps  ?? currentTpRef.current,
       }
 
-      const tookRealAction = traceEntries.some(
-        t => t.tool !== 'monitor_only' && t.tool !== 'decision_summary_tool'
-      )
+      // Anomaly event data — computed before mutating activeAnomalyRef
+      const anomalyWinCount = (res.anomaly_response as Record<string, unknown>)?.anomaly_windows as number ?? 0
+      const winArr = (res.anomaly_response as Record<string, unknown>)?.windows as { reconstruction_score: number }[] ?? []
+      const peakScore = winArr.reduce((m, w) => Math.max(m, w.reconstruction_score), 0)
+      const now = Date.now()
+      const wasAnomalous  = !!activeAnomalyRef.current
+      const isNowAnomalous = anomalyWinCount > 0
 
-      // Read awaitingAfter synchronously via ref to decide what to do
-      if (awaitingAfterRef.current) {
-        setAfterSnapshot(snapshot)
-        setAwaitingAfter(false)
-        awaitingAfterRef.current = false
-      } else if (tookRealAction) {
+      // Before/after tied to anomaly state transitions (not agent actions):
+      //   BEFORE = metrics at the moment the anomaly model first fires (degraded snapshot)
+      //   AFTER  = metrics at the moment the anomaly model clears (recovered snapshot)
+      if (isNowAnomalous && !wasAnomalous) {
         setBeforeSnapshot(snapshot)
         setAfterSnapshot(null)
         setAwaitingAfter(true)
         awaitingAfterRef.current = true
+        awaitingAfterCyclesRef.current = 0
+      } else if (!isNowAnomalous && wasAnomalous && awaitingAfterRef.current) {
+        setAfterSnapshot(snapshot)
+        setAwaitingAfter(false)
+        awaitingAfterRef.current = false
+        awaitingAfterCyclesRef.current = 0
+      }
+
+      // Anomaly event timeline tracking
+      if (isNowAnomalous) {
+        if (!activeAnomalyRef.current) {
+          const ev: AnomalyEvent = { detectedAt: now, resolvedAt: null, peakScore, windowCount: anomalyWinCount }
+          activeAnomalyRef.current = ev
+          anomalyEventsRef.current = [...anomalyEventsRef.current.slice(-9), ev]
+          setAnomalyEvents([...anomalyEventsRef.current])
+        } else {
+          activeAnomalyRef.current.peakScore = Math.max(activeAnomalyRef.current.peakScore, peakScore)
+          activeAnomalyRef.current.windowCount = Math.max(activeAnomalyRef.current.windowCount, anomalyWinCount)
+        }
+      } else if (activeAnomalyRef.current) {
+        activeAnomalyRef.current.resolvedAt = now
+        setAnomalyEvents([...anomalyEventsRef.current])
+        activeAnomalyRef.current = null
       }
 
       // Fallback: build a history point from avg_metrics when /latest is unavailable
@@ -709,6 +886,16 @@ export default function OptimizationPage() {
     } catch (error) {
       const message = getApiErrorMessage(error)
       setPipelineError(message)
+
+      // Give up waiting for "after" after 3 failed cycles to avoid infinite "pending"
+      if (awaitingAfterRef.current) {
+        awaitingAfterCyclesRef.current += 1
+        if (awaitingAfterCyclesRef.current > 3) {
+          setAwaitingAfter(false)
+          awaitingAfterRef.current = false
+          awaitingAfterCyclesRef.current = 0
+        }
+      }
 
       const current = pipelineDelayRef.current
       const isRateLimited = message.includes('HTTP 429')
@@ -985,7 +1172,7 @@ export default function OptimizationPage() {
             <AlertBanner anomalyResponse={anomaly} slaResponse={sla} />
 
             {/* AI Summary */}
-            <AiSummaryCard decision={decision} isMock={isMockMode} errorMessage={pipelineError} />
+            <AiSummaryCard decision={decision} isMock={isMockMode} errorMessage={pipelineError} toolTrace={toolTrace} avgMetrics={avg30} anomalyResult={anomaly} slaResult={sla} />
 
             {/* 4 KPI cards */}
             <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
@@ -1132,37 +1319,115 @@ export default function OptimizationPage() {
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
 
               {/* Anomaly */}
-              <div className="glass rounded-2xl border border-border p-5">
-                <div className="flex items-center justify-between mb-4">
-                  <div className="flex items-center gap-2">
-                    <AlertTriangle className="w-4 h-4 text-orange-400" />
-                    <h3 className="text-sm font-bold text-white">Anomaly Detection</h3>
-                  </div>
-                  <span className={`text-[10px] px-2 py-0.5 rounded-full border font-semibold
-                    ${isMockMode ? 'bg-amber-400/10 border-amber-400/30 text-amber-400' : 'bg-emerald-400/10 border-emerald-400/30 text-emerald-400'}`}>
-                    {isMockMode ? <><Database className="inline w-3 h-3 mr-1" />mock</> : <><Radio className="inline w-3 h-3 mr-1" />real</>}
-                  </span>
-                </div>
-                {(() => {
-                  const windows = (anomaly.windows as { is_anomaly: boolean; reconstruction_score: number }[]) ?? []
-                  const ac = windows.filter(w => w.is_anomaly).length
-                  const as_ = windows.length > 0 ? windows.reduce((s, w) => s + w.reconstruction_score, 0) / windows.length : 0
-                  return [
-                    { label: 'Model Type',       value: String(anomaly.model_type ?? (isMockMode ? 'mock' : '—')) },
-                    { label: 'Anomaly Windows',  value: windows.length ? `${ac} / ${windows.length}` : String(anomaly.anomaly_detected ?? '—') },
-                    { label: 'Avg Recon Score',  value: windows.length ? as_.toFixed(4) : String(anomaly.anomaly_score ?? '—') },
-                    { label: 'Threshold',        value: String(anomaly.threshold_name ?? anomaly.threshold ?? '—') },
-                    { label: 'Window Size',      value: String(anomaly.window_size ?? '—') },
-                  ].map(row => (
-                    <div key={row.label} className="flex justify-between border-b border-border/30 pb-1.5 last:border-0 py-1.5">
-                      <span className="text-xs text-muted">{row.label}</span>
-                      <span className={`text-xs font-semibold ${
-                        row.label === 'Anomaly Windows' && ac > 0 ? 'text-orange-400' : 'text-white'
-                      }`}>{row.value}</span>
+              {(() => {
+                const windows = (anomaly.windows as { is_anomaly: boolean; reconstruction_score: number }[]) ?? []
+                const anomalyCount = windows.filter(w => w.is_anomaly).length
+                const totalWindows = windows.length || (anomaly.total_windows as number) || 0
+                const isAnomalous = anomalyCount > 0 || anomaly.anomaly_detected === true
+                const threshold = (anomaly.threshold_value as number) ?? (anomaly.threshold_used as number) ?? null
+                const activeEvt = anomalyEventsRef.current[anomalyEventsRef.current.length - 1]
+                const recentEvents = [...anomalyEvents].reverse().slice(0, 3)
+
+                const fmtDuration = (ms: number) => {
+                  const s = Math.round(ms / 1000)
+                  return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m ${s % 60}s`
+                }
+                const fmtTs = (ts: number) =>
+                  new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+
+                return (
+                  <div className={`glass rounded-2xl border p-5 transition-colors ${
+                    isAnomalous ? 'border-red-500/50' : 'border-emerald-500/30'
+                  }`}>
+                    {/* Header */}
+                    <div className="flex items-center justify-between mb-3">
+                      <div className="flex items-center gap-2">
+                        <AlertTriangle className={`w-4 h-4 ${isAnomalous ? 'text-red-400' : 'text-emerald-400'}`} />
+                        <h3 className="text-sm font-bold text-white">Anomaly Detection</h3>
+                      </div>
+                      <span className={`text-[10px] px-2 py-0.5 rounded-full border font-semibold
+                        ${isMockMode ? 'bg-amber-400/10 border-amber-400/30 text-amber-400' : 'bg-emerald-400/10 border-emerald-400/30 text-emerald-400'}`}>
+                        {isMockMode ? <><Database className="inline w-3 h-3 mr-1" />mock</> : <><Radio className="inline w-3 h-3 mr-1" />real</>}
+                      </span>
                     </div>
-                  ))
-                })()}
-              </div>
+
+                    {/* Status hero */}
+                    <div className={`flex items-center gap-3 rounded-xl px-4 py-3 mb-4 ${
+                      isAnomalous ? 'bg-red-500/10 border border-red-500/30' : 'bg-emerald-500/10 border border-emerald-500/20'
+                    }`}>
+                      <span className={`relative flex h-3 w-3 flex-shrink-0`}>
+                        {isAnomalous && <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-red-400 opacity-75" />}
+                        <span className={`relative inline-flex rounded-full h-3 w-3 ${isAnomalous ? 'bg-red-500' : 'bg-emerald-400'}`} />
+                      </span>
+                      <div className="flex-1">
+                        <p className={`text-sm font-bold tracking-wide ${isAnomalous ? 'text-red-300' : 'text-emerald-300'}`}>
+                          {isAnomalous ? 'ANOMALY DETECTED' : 'NORMAL'}
+                        </p>
+                        {totalWindows > 0 && (
+                          <p className="text-[10px] text-muted mt-0.5">
+                            {anomalyCount} of {totalWindows} windows flagged
+                            {activeEvt && !activeEvt.resolvedAt
+                              ? ` · active since ${fmtTs(activeEvt.detectedAt)}`
+                              : activeEvt?.resolvedAt
+                              ? ` · resolved ${fmtDuration(Date.now() - activeEvt.resolvedAt)} ago`
+                              : ''}
+                          </p>
+                        )}
+                      </div>
+                      {totalWindows > 0 && (
+                        <span className={`text-lg font-mono font-bold ${isAnomalous ? 'text-red-300' : 'text-emerald-300'}`}>
+                          {anomalyCount}/{totalWindows}
+                        </span>
+                      )}
+                    </div>
+
+                    {/* Window score bars */}
+                    {windows.length > 0 && (
+                      <div className="mb-4">
+                        <p className="text-[10px] text-muted mb-1.5">Window reconstruction scores</p>
+                        <div className="flex gap-1 items-end h-8">
+                          {windows.map((w, i) => {
+                            const maxPossible = threshold ? threshold * 2 : 2
+                            const height = Math.min(100, (w.reconstruction_score / maxPossible) * 100)
+                            return (
+                              <div key={i} className="flex-1 flex flex-col justify-end" title={`Score: ${w.reconstruction_score.toFixed(4)}`}>
+                                <div
+                                  className={`rounded-sm transition-all ${w.is_anomaly ? 'bg-red-500' : 'bg-emerald-500/50'}`}
+                                  style={{ height: `${Math.max(15, height)}%` }}
+                                />
+                              </div>
+                            )
+                          })}
+                        </div>
+                        {threshold && (
+                          <p className="text-[10px] text-muted mt-1">
+                            Threshold: <span className="text-white font-mono">{threshold.toFixed(4)}</span>
+                            {' · '}Model: <span className="text-white">{String(anomaly.model_type ?? '—')}</span>
+                          </p>
+                        )}
+                      </div>
+                    )}
+
+                    {/* Event history */}
+                    {recentEvents.length > 0 && (
+                      <div className="space-y-1.5">
+                        <p className="text-[10px] text-muted font-semibold uppercase tracking-wider">Recent Events</p>
+                        {recentEvents.map((ev, i) => (
+                          <div key={i} className="flex items-center justify-between text-[10px]">
+                            <span className="text-muted">{fmtTs(ev.detectedAt)}</span>
+                            <span className={`font-semibold ${ev.resolvedAt ? 'text-emerald-400' : 'text-red-400'}`}>
+                              {ev.resolvedAt
+                                ? `resolved after ${fmtDuration(ev.resolvedAt - ev.detectedAt)}`
+                                : 'ongoing'}
+                            </span>
+                            <span className="text-muted font-mono">{ev.windowCount}w · {ev.peakScore.toFixed(3)}</span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )
+              })()}
 
               {/* SLA */}
               <div className="glass rounded-2xl border border-border p-5">

@@ -328,6 +328,22 @@ def predict(req: PredictRequest) -> PredictResponse:
 
         df = pd.DataFrame(req.rows)
         X_raw = df[features].astype(np.float32).values
+
+        # Streaming features are 0.0 when AStream is stale/unavailable.
+        # 0.0 is far outside the training distribution for these features
+        # (e.g. streaming_mos trains ~1.0–4.5, so 0.0 → scaled ≈ −4.4).
+        # Substitute the training median (scaler.center_) so the scaled value
+        # is exactly 0.0 — the least-anomalous point in scaled space.
+        _STREAMING_FEATURES = {
+            "streaming_mos", "effective_bitrate_mbps", "video_start_time_ms",
+            "buffering_ratio", "rebuffering_freq", "rebuffering_count", "total_stall_seconds",
+        }
+        _scaler = artifacts["scaler"]
+        for _i, _feat in enumerate(features):
+            if _feat in _STREAMING_FEATURES:
+                _mask = (X_raw[:, _i] == 0.0) | np.isnan(X_raw[:, _i])
+                X_raw[_mask, _i] = float(_scaler.center_[_i])
+
         X_clip = _apply_clips(X_raw, features, artifacts["clip_bounds"])
         X_scaled = artifacts["scaler"].transform(X_clip).astype(np.float32)
 
