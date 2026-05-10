@@ -1,30 +1,197 @@
 'use client'
 
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { useRouter } from 'next/navigation'
 import Link from 'next/link'
-import { motion } from 'framer-motion'
-import { Activity, LogOut, LayoutDashboard, Cpu, AlertTriangle, TrendingUp, Shield, MessageSquare, Zap } from 'lucide-react'
+import { motion, AnimatePresence } from 'framer-motion'
+import {
+  Activity, LogOut, Cpu, AlertTriangle, TrendingUp, Radio,
+  Shield, MessageSquare, Zap, Brain, ArrowRight, Network,
+  Clock, X, ChevronRight, WifiOff, RefreshCw,
+} from 'lucide-react'
 import { isAuthenticated, getUsername, getRole } from '@/lib/auth'
 import { useAuth } from '@/hooks/useAuth'
+import {
+  getTelemetryStatus, runMockOptimization, getServicesHealth,
+  OptimizationResponse, ServicesHealth,
+} from '@/lib/api'
+
+// ─── Alert history ────────────────────────────────────────────────────────────
+
+interface AlertEntry {
+  ts: number
+  riskLevel: string
+  anomalyWindows: number
+  slaAlerts: number
+  summary: string
+}
+
+const HISTORY_KEY = 'qosentry_alert_history'
+
+function todayKey() {
+  return new Date().toISOString().slice(0, 10)
+}
+
+function loadHistory(): AlertEntry[] {
+  try {
+    const raw = localStorage.getItem(`${HISTORY_KEY}_${todayKey()}`)
+    return raw ? JSON.parse(raw) : []
+  } catch { return [] }
+}
+
+function saveHistory(entries: AlertEntry[]) {
+  try {
+    localStorage.setItem(`${HISTORY_KEY}_${todayKey()}`, JSON.stringify(entries))
+  } catch { /* ignore */ }
+}
+
+function pushAlert(entry: AlertEntry, prev: AlertEntry[]): AlertEntry[] {
+  const updated = [entry, ...prev].slice(0, 100)
+  saveHistory(updated)
+  return updated
+}
+
+// ─── Helpers ─────────────────────────────────────────────────────────────────
+
+function riskColor(level: string) {
+  if (level === 'critical') return 'text-red-400'
+  if (level === 'high')     return 'text-orange-400'
+  if (level === 'medium')   return 'text-amber-400'
+  return 'text-emerald-400'
+}
+
+function riskBg(level: string) {
+  if (level === 'critical') return 'bg-red-400/10 border-red-400/30'
+  if (level === 'high')     return 'bg-orange-400/10 border-orange-400/30'
+  if (level === 'medium')   return 'bg-amber-400/10 border-amber-400/30'
+  return 'bg-emerald-400/10 border-emerald-400/30'
+}
+
+function fmtTime(ts: number) {
+  return new Date(ts).toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' })
+}
+
+// ─── Component ────────────────────────────────────────────────────────────────
 
 export default function DashboardPage() {
   const router = useRouter()
   const { logout } = useAuth()
-  const [username, setUsername] = useState<string | null>(null)
-  const [role, setRole] = useState<string | null>(null)
-  const [mounted, setMounted] = useState(false)
+  const [username, setUsername]   = useState<string | null>(null)
+  const [role, setRole]           = useState<string | null>(null)
+  const [mounted, setMounted]     = useState(false)
 
+  // live state
+  const [isLive, setIsLive]           = useState(false)
+  const [bufferSize, setBufferSize]   = useState(0)
+  const [activeAlerts, setActiveAlerts] = useState(0)
+  const [riskLevel, setRiskLevel]     = useState('low')
+  const [slaStatus, setSlaStatus]     = useState<string | null>(null)
+  const [lastOptRun, setLastOptRun]   = useState<number | null>(null)
+  const [optRunning, setOptRunning]   = useState(false)
+  const [health, setHealth]           = useState<ServicesHealth | null>(null)
+  const healthTimer                   = useRef<ReturnType<typeof setInterval> | null>(null)
+
+  // alert history panel
+  const [historyOpen, setHistoryOpen] = useState(false)
+  const [history, setHistory]         = useState<AlertEntry[]>([])
+
+  const telemetryTimer = useRef<ReturnType<typeof setInterval> | null>(null)
+  const optTimer       = useRef<ReturnType<typeof setInterval> | null>(null)
+
+  // ── Auth gate ──────────────────────────────────────────────────────────────
   useEffect(() => {
-    if (!isAuthenticated()) {
-      router.replace('/login')
-      return
-    }
+    if (!isAuthenticated()) { router.replace('/login'); return }
     setUsername(getUsername())
     setRole(getRole())
+    setHistory(loadHistory())
     setMounted(true)
   }, [router])
 
+  // ── Poll services health every 15 s ──────────────────────────────────────
+  const fetchHealth = useCallback(async () => {
+    try {
+      const h = await getServicesHealth()
+      setHealth(h)
+    } catch {
+      setHealth({ anomaly_detection: 'offline', sla_forecasting: 'offline', agent: 'offline', rag: 'offline' })
+    }
+  }, [])
+
+  // ── Poll telemetry status every 5 s ───────────────────────────────────────
+  const fetchTelemetry = useCallback(async () => {
+    try {
+      const s = await getTelemetryStatus()
+      setIsLive(s.live_mode)
+      setBufferSize(s.buffer_size)
+    } catch {
+      setIsLive(false)
+    }
+  }, [])
+
+  // ── Poll optimizer every 30 s ─────────────────────────────────────────────
+  const fetchOptimization = useCallback(async () => {
+    setOptRunning(true)
+    try {
+      const res: OptimizationResponse = await runMockOptimization()
+
+      // Ignore simulated data — only trust results from a live Mininet feed
+      if (res.mock_mode) {
+        setLastOptRun(Date.now())
+        return
+      }
+
+      const anomalyRes  = res.anomaly_response  as Record<string, unknown>
+      const slaRes      = res.sla_response      as Record<string, unknown>
+      const decision    = res.optimization_decision
+
+      const anomalyWindows = Number(anomalyRes?.anomaly_windows ?? 0)
+      const slaAlerts      = Number(slaRes?.alert_count          ?? 0)
+      const risk           = (decision?.risk_level ?? 'low') as string
+      const summary        = (decision?.decision_summary ?? '') as string
+
+      // Only count active alerts when agent determines risk is elevated
+      const isElevated = risk === 'medium' || risk === 'high' || risk === 'critical'
+      const total      = isElevated ? anomalyWindows + slaAlerts : 0
+
+      setActiveAlerts(total)
+      setRiskLevel(risk)
+      setSlaStatus(isElevated && slaAlerts > 0 ? 'At Risk' : 'Nominal')
+      setLastOptRun(Date.now())
+
+      // Only push to history when risk is elevated (skip monitor-only / low-risk runs)
+      if (isElevated && total > 0) {
+        const entry: AlertEntry = {
+          ts: Date.now(),
+          riskLevel: risk,
+          anomalyWindows,
+          slaAlerts,
+          summary,
+        }
+        setHistory(prev => pushAlert(entry, prev))
+      }
+    } catch {
+      // optimizer unavailable — keep previous values
+    } finally {
+      setOptRunning(false)
+    }
+  }, [])
+
+  useEffect(() => {
+    if (!mounted) return
+    fetchHealth()
+    fetchTelemetry()
+    fetchOptimization()
+    healthTimer.current    = setInterval(fetchHealth,       15_000)
+    telemetryTimer.current = setInterval(fetchTelemetry,    5_000)
+    optTimer.current       = setInterval(fetchOptimization, 30_000)
+    return () => {
+      if (healthTimer.current)    clearInterval(healthTimer.current)
+      if (telemetryTimer.current) clearInterval(telemetryTimer.current)
+      if (optTimer.current)       clearInterval(optTimer.current)
+    }
+  }, [mounted, fetchHealth, fetchTelemetry, fetchOptimization])
+
+  // ── Loading ────────────────────────────────────────────────────────────────
   if (!mounted) {
     return (
       <div className="min-h-screen bg-background flex items-center justify-center">
@@ -33,16 +200,29 @@ export default function DashboardPage() {
     )
   }
 
-  const cards = [
-    { icon: Cpu, label: 'AI Models', value: 'Online', color: 'text-accent', bg: 'bg-accent/10' },
-    { icon: AlertTriangle, label: 'Active Alerts', value: '0', color: 'text-danger', bg: 'bg-danger/10' },
-    { icon: TrendingUp, label: 'SLA Status', value: 'Nominal', color: 'text-primary', bg: 'bg-primary/10' },
-    { icon: LayoutDashboard, label: 'Telemetry', value: 'Streaming', color: 'text-secondary', bg: 'bg-secondary/10' },
+  const onlineCount = health
+    ? Object.values(health).filter(v => v === 'online').length
+    : null
+  const aiModelsValue = health === null ? '—'
+    : onlineCount === 4 ? 'All Online'
+    : onlineCount === 0 ? 'Offline'
+    : `${onlineCount} / 4 Online`
+  const aiModelsColor = health === null ? 'text-muted'
+    : onlineCount === 4 ? 'text-accent'
+    : onlineCount === 0 ? 'text-danger'
+    : 'text-amber-400'
+
+  const pipeline = [
+    { icon: Network,    label: 'Mininet / Ryu',      desc: 'SDN telemetry via Redis pub/sub',           color: 'text-muted',     dot: isLive ? 'bg-secondary' : 'bg-muted/40' },
+    { icon: Brain,      label: 'Anomaly Detection',  desc: 'BiLSTM · TCN · Transformer autoencoders',   color: 'text-red-400',   dot: 'bg-red-400'   },
+    { icon: TrendingUp, label: 'SLA Forecasting',    desc: 'TCN + BiLSTM ensemble · QoE class scoring', color: 'text-secondary', dot: 'bg-secondary' },
+    { icon: Zap,        label: 'Optimization Agent', desc: 'LangGraph orchestration · tool execution',  color: 'text-primary',   dot: 'bg-primary'   },
   ]
 
   return (
     <div className="min-h-screen bg-background">
-      {/* Top bar */}
+
+      {/* ── Top bar ── */}
       <header className="border-b border-border bg-surface/40 backdrop-blur-md sticky top-0 z-10">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between">
           <div className="flex items-center gap-3">
@@ -72,164 +252,330 @@ export default function DashboardPage() {
         </div>
       </header>
 
-      <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-12">
-        <motion.div
-          initial={{ opacity: 0, y: 20 }}
-          animate={{ opacity: 1, y: 0 }}
-          transition={{ duration: 0.5 }}
-        >
-          {/* Welcome */}
-          <div className="mb-10">
-            <h1 className="text-3xl font-bold text-text-main">
-              Welcome back,{' '}
-              <span className="text-gradient">{username ?? 'User'}</span>
-            </h1>
+      <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-12 space-y-10">
+
+        {/* ── Welcome ── */}
+        <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.5 }}>
+          <h1 className="text-3xl font-bold text-text-main">
+            Welcome back, <span className="text-gradient">{username ?? 'User'}</span>
+          </h1>
+          <div className="flex items-center gap-3 mt-2 flex-wrap">
             {role && (
-              <span className="inline-block mt-2 px-2.5 py-0.5 text-xs font-semibold rounded-full bg-primary/10 border border-primary/30 text-primary">
+              <span className="px-2.5 py-0.5 text-xs font-semibold rounded-full bg-primary/10 border border-primary/30 text-primary">
                 {role}
               </span>
             )}
+            {isLive ? (
+              <span className="flex items-center gap-1.5 text-xs text-secondary">
+                <span className="relative flex h-2 w-2">
+                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-secondary opacity-75" />
+                  <span className="relative inline-flex rounded-full h-2 w-2 bg-secondary" />
+                </span>
+                Mininet feed active · {bufferSize} rows
+              </span>
+            ) : (
+              <span className="flex items-center gap-1.5 text-xs text-muted">
+                <WifiOff className="w-3 h-3" />
+                Mininet not connected
+              </span>
+            )}
+            {lastOptRun && (
+              <span className="flex items-center gap-1 text-xs text-muted">
+                <RefreshCw className={`w-3 h-3 ${optRunning ? 'animate-spin text-primary' : ''}`} />
+                Last scan {fmtTime(lastOptRun)}
+              </span>
+            )}
           </div>
+        </motion.div>
 
-          {/* Status cards */}
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6 mb-12">
-            {cards.map((card, i) => {
-              const Icon = card.icon
-              return (
-                <motion.div
-                  key={card.label}
-                  initial={{ opacity: 0, y: 30 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  transition={{ delay: i * 0.1, duration: 0.5 }}
-                  className="glass rounded-2xl p-6 border border-border hover:border-primary/30 transition-colors"
-                >
-                  <div className={`inline-flex p-2.5 rounded-xl ${card.bg} mb-3`}>
-                    <Icon className={`w-5 h-5 ${card.color}`} />
-                  </div>
-                  <p className="text-muted text-xs font-medium mb-1">{card.label}</p>
-                  <p className={`text-lg font-bold ${card.color}`}>{card.value}</p>
-                </motion.div>
-              )
-            })}
-          </div>
-
-          {/* Inference actions */}
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-12">
-            <motion.div
-              initial={{ opacity: 0, y: 30 }}
-              animate={{ opacity: 1, y: 0 }}
-              transition={{ delay: 0.2, duration: 0.5 }}
-              className="glass rounded-2xl p-6 border border-border hover:border-primary/40 transition-colors"
-            >
-              <p className="text-xs uppercase tracking-wide text-primary font-semibold mb-2">Inference</p>
-              <h3 className="text-xl font-bold text-text-main mb-2">Anomaly Detection</h3>
-              <p className="text-sm text-muted mb-5">
-                Run autoencoder-based anomaly inference using live telemetry rows and threshold controls.
+        {/* ── Status strip ── */}
+        <motion.div
+          initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.1 }}
+          className="grid grid-cols-2 lg:grid-cols-4 gap-4"
+        >
+          {/* AI Models */}
+          <div className="glass rounded-2xl p-5 border border-border">
+            <div className={`inline-flex p-2 rounded-xl ${aiModelsColor === 'text-accent' ? 'bg-accent/10' : aiModelsColor === 'text-danger' ? 'bg-danger/10' : 'bg-amber-400/10'} mb-3`}>
+              <Cpu className={`w-4 h-4 ${aiModelsColor}`} />
+            </div>
+            <p className="text-muted text-xs font-medium mb-0.5">AI Models</p>
+            <p className={`text-base font-bold ${aiModelsColor}`}>{aiModelsValue}</p>
+            {health && onlineCount !== null && onlineCount < 4 && (
+              <p className="text-[10px] text-muted mt-1">
+                {Object.entries(health).filter(([,v]) => v === 'offline').map(([k]) => k.replace('_', ' ')).join(', ')} offline
               </p>
-              <Link
-                href="/inference/anomaly"
-                className="inline-flex items-center justify-center rounded-xl px-4 py-2 text-sm font-semibold bg-primary/20 text-primary border border-primary/40 hover:bg-primary/30 transition-colors"
-              >
-                Open Anomaly Inference
-              </Link>
-            </motion.div>
-
-            <motion.div
-              initial={{ opacity: 0, y: 30 }}
-              animate={{ opacity: 1, y: 0 }}
-              transition={{ delay: 0.3, duration: 0.5 }}
-              className="glass rounded-2xl p-6 border border-border hover:border-secondary/40 transition-colors"
-            >
-              <p className="text-xs uppercase tracking-wide text-secondary font-semibold mb-2">Inference</p>
-              <h3 className="text-xl font-bold text-text-main mb-2">SLA Forecasting</h3>
-              <p className="text-sm text-muted mb-5">
-                Score future QoE classes and SLA risk windows for selected run and segment combinations.
-              </p>
-              <Link
-                href="/inference/sla"
-                className="inline-flex items-center justify-center rounded-xl px-4 py-2 text-sm font-semibold bg-secondary/20 text-secondary border border-secondary/40 hover:bg-secondary/30 transition-colors"
-              >
-                Open SLA Inference
-              </Link>
-            </motion.div>
+            )}
           </div>
 
-          <motion.div
-            initial={{ opacity: 0, y: 30 }}
-            animate={{ opacity: 1, y: 0 }}
-            transition={{ delay: 0.35, duration: 0.5 }}
-            className="glass rounded-2xl p-6 border border-border hover:border-primary/40 transition-colors mb-12"
+          {/* Active Alerts — clickable */}
+          <button
+            onClick={() => setHistoryOpen(true)}
+            className="glass rounded-2xl p-5 border border-border hover:border-danger/40 transition-colors text-left group"
           >
-            <p className="text-xs uppercase tracking-wide text-primary font-semibold mb-2">AI Assistant</p>
-            <h3 className="text-xl font-bold text-text-main mb-2 flex items-center gap-2">
-              <MessageSquare className="w-5 h-5 text-primary" />
-              QoS Chat Workspace
-            </h3>
-            <p className="text-sm text-muted mb-5">
-              Open the integrated chat assistant for QoS analysis, source-grounded responses, and document retrieval.
+            <div className="inline-flex p-2 rounded-xl bg-danger/10 mb-3">
+              <AlertTriangle className="w-4 h-4 text-danger" />
+            </div>
+            <p className="text-muted text-xs font-medium mb-0.5 flex items-center gap-1">
+              Active Alerts
+              <ChevronRight className="w-3 h-3 opacity-0 group-hover:opacity-100 transition-opacity" />
             </p>
-            <Link
-              href="/chat"
-              className="inline-flex items-center justify-center rounded-xl px-4 py-2 text-sm font-semibold bg-primary/20 text-primary border border-primary/40 hover:bg-primary/30 transition-colors"
-            >
-              Open Chat Workspace
-            </Link>
-          </motion.div>
+            <p className={`text-base font-bold ${activeAlerts > 0 ? 'text-danger' : 'text-emerald-400'}`}>
+              {activeAlerts}
+            </p>
+            {history.length > 0 && (
+              <p className="text-[10px] text-muted mt-1">{history.length} alerts today</p>
+            )}
+          </button>
 
+          {/* SLA Status */}
+          <div className="glass rounded-2xl p-5 border border-border">
+            <div className={`inline-flex p-2 rounded-xl ${slaStatus === null ? 'bg-muted/10' : 'bg-primary/10'} mb-3`}>
+              <TrendingUp className={`w-4 h-4 ${slaStatus === null ? 'text-muted' : 'text-primary'}`} />
+            </div>
+            <p className="text-muted text-xs font-medium mb-0.5">SLA Status</p>
+            <p className={`text-base font-bold ${slaStatus === null ? 'text-muted' : slaStatus === 'Nominal' ? 'text-primary' : 'text-amber-400'}`}>
+              {slaStatus ?? '—'}
+            </p>
+            {slaStatus === null && (
+              <p className="text-[10px] text-muted mt-1">awaiting optimizer</p>
+            )}
+          </div>
+
+          {/* Mininet Feed */}
+          <div className="glass rounded-2xl p-5 border border-border">
+            <div className={`inline-flex p-2 rounded-xl ${isLive ? 'bg-secondary/10' : 'bg-muted/10'} mb-3`}>
+              <Radio className={`w-4 h-4 ${isLive ? 'text-secondary' : 'text-muted'}`} />
+            </div>
+            <p className="text-muted text-xs font-medium mb-0.5">Mininet Feed</p>
+            {isLive ? (
+              <p className="text-base font-bold text-secondary flex items-center gap-1.5">
+                <span className="relative flex h-2 w-2">
+                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-secondary opacity-60" />
+                  <span className="relative inline-flex rounded-full h-2 w-2 bg-secondary" />
+                </span>
+                Live
+              </p>
+            ) : (
+              <p className="text-base font-bold text-muted flex items-center gap-1.5">
+                <WifiOff className="w-3.5 h-3.5" />
+                Not Active
+              </p>
+            )}
+          </div>
+        </motion.div>
+
+        {/* ── Risk badge ── */}
+        <AnimatePresence>
+          {activeAlerts > 0 && (
+            <motion.div
+              initial={{ opacity: 0, height: 0 }}
+              animate={{ opacity: 1, height: 'auto' }}
+              exit={{ opacity: 0, height: 0 }}
+              className={`glass rounded-2xl border p-4 flex items-center gap-3 ${riskBg(riskLevel)}`}
+            >
+              <AlertTriangle className={`w-4 h-4 shrink-0 ${riskColor(riskLevel)}`} />
+              <div className="flex-1 min-w-0">
+                <p className={`text-sm font-semibold capitalize ${riskColor(riskLevel)}`}>
+                  {riskLevel} risk detected — {activeAlerts} active alert{activeAlerts !== 1 ? 's' : ''}
+                </p>
+                {history[0]?.summary && (
+                  <p className="text-xs text-muted truncate mt-0.5">{history[0].summary}</p>
+                )}
+              </div>
+              <button
+                onClick={() => setHistoryOpen(true)}
+                className={`text-xs font-semibold shrink-0 ${riskColor(riskLevel)} hover:underline`}
+              >
+                View history
+              </button>
+            </motion.div>
+          )}
+        </AnimatePresence>
+
+        {/* ── Main actions ── */}
+        <motion.div
+          initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.25 }}
+          className="grid grid-cols-1 md:grid-cols-2 gap-6"
+        >
           {/* Optimization Agent */}
-          <motion.div
-            initial={{ opacity: 0, y: 30 }}
-            animate={{ opacity: 1, y: 0 }}
-            transition={{ delay: 0.4, duration: 0.5 }}
-            className="glass rounded-2xl p-6 border border-border hover:border-primary/40 transition-colors mb-12"
-          >
-            <p className="text-xs uppercase tracking-wide text-primary font-semibold mb-2">AI Agent</p>
-            <h3 className="text-xl font-bold text-text-main mb-2 flex items-center gap-2">
-              <Zap className="w-5 h-5 text-primary" />
-              Network Optimization
-            </h3>
-            <p className="text-sm text-muted mb-5">
-              Full pipeline: telemetry ingestion → anomaly detection → SLA forecasting → LangGraph agent decision with tool execution trace.
+          <div className="glass rounded-2xl border border-primary/30 hover:border-primary/60 transition-colors p-8 flex flex-col bg-gradient-to-br from-primary/5 to-transparent">
+            <div className="flex items-center gap-3 mb-4">
+              <div className="p-3 rounded-xl bg-primary/10">
+                <Zap className="w-6 h-6 text-primary" />
+              </div>
+              <div>
+                <p className="text-[10px] uppercase tracking-widest text-primary font-bold">AI Agent</p>
+                <h3 className="text-xl font-bold text-text-main">Network Optimization</h3>
+              </div>
+              {optRunning && <RefreshCw className="w-3.5 h-3.5 text-primary animate-spin ml-auto" />}
+            </div>
+            <p className="text-sm text-muted leading-relaxed mb-5 flex-1">
+              Real-time pipeline powered by live Mininet telemetry. Anomaly detection and SLA forecasting
+              feed the LangGraph orchestration agent, producing topology-aware remediation recommendations
+              with full tool execution tracing.
             </p>
+            <div className="flex items-center gap-2 mb-6 flex-wrap">
+              {['Anomaly Detection', 'SLA Forecasting', 'LangGraph Agent'].map(tag => (
+                <span key={tag} className="text-[10px] px-2 py-0.5 rounded-full bg-primary/10 border border-primary/20 text-primary font-medium">
+                  {tag}
+                </span>
+              ))}
+            </div>
             <Link
               href="/inference/optimization"
-              className="inline-flex items-center justify-center rounded-xl px-4 py-2 text-sm font-semibold bg-primary/20 text-primary border border-primary/40 hover:bg-primary/30 transition-colors"
+              className="inline-flex items-center justify-center gap-2 rounded-xl px-5 py-2.5 text-sm font-semibold bg-primary text-white hover:bg-primary/90 transition-colors self-start"
             >
               Open Optimization Agent
+              <ArrowRight className="w-4 h-4" />
             </Link>
-          </motion.div>
+          </div>
 
-          {/* Coming soon */}
-          <motion.div
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            transition={{ delay: 0.5 }}
-            className="glass rounded-2xl p-12 text-center border border-border/50"
-          >
-            <div className="w-16 h-16 rounded-2xl bg-gradient-to-br from-primary/20 to-secondary/20 border border-primary/30 flex items-center justify-center mx-auto mb-4">
-              <LayoutDashboard className="w-8 h-8 text-primary" />
+          {/* Chat Workspace */}
+          <div className="glass rounded-2xl border border-secondary/30 hover:border-secondary/60 transition-colors p-8 flex flex-col bg-gradient-to-br from-secondary/5 to-transparent">
+            <div className="flex items-center gap-3 mb-4">
+              <div className="p-3 rounded-xl bg-secondary/10">
+                <MessageSquare className="w-6 h-6 text-secondary" />
+              </div>
+              <div>
+                <p className="text-[10px] uppercase tracking-widest text-secondary font-bold">RAG · LLM</p>
+                <h3 className="text-xl font-bold text-text-main">QoS Chat Workspace</h3>
+              </div>
             </div>
-            <h2 className="text-2xl font-bold text-text-main mb-3">Dashboard coming soon</h2>
-            <p className="text-muted max-w-lg mx-auto leading-relaxed">
-              The full QoSentry dashboard — real-time anomaly detection, SLA breach forecasts,
-              RL-based remediation recommendations, and AI executive reports — is under active
-              development.
+            <p className="text-sm text-muted leading-relaxed mb-5 flex-1">
+              Source-grounded Q&amp;A backed by Qdrant hybrid search over your network documentation.
+              Multi-turn conversations with citations, document ingestion, and persistent thread history.
             </p>
-            <div className="flex flex-wrap justify-center gap-3 mt-6">
-              {['Anomaly Detection', 'SLA Forecasting', 'Digital Twin', 'Executive Reports'].map(
-                (feat) => (
-                  <span
-                    key={feat}
-                    className="text-xs px-3 py-1.5 rounded-full bg-surface border border-border text-muted"
-                  >
-                    {feat}
-                  </span>
-                )
-              )}
+            <div className="flex items-center gap-2 mb-6 flex-wrap">
+              {['RAG Retrieval', 'Qdrant Search', 'Thread History'].map(tag => (
+                <span key={tag} className="text-[10px] px-2 py-0.5 rounded-full bg-secondary/10 border border-secondary/20 text-secondary font-medium">
+                  {tag}
+                </span>
+              ))}
             </div>
-          </motion.div>
+            <Link
+              href="/chat"
+              className="inline-flex items-center justify-center gap-2 rounded-xl px-5 py-2.5 text-sm font-semibold bg-secondary text-white hover:bg-secondary/90 transition-colors self-start"
+            >
+              Open Chat Workspace
+              <ArrowRight className="w-4 h-4" />
+            </Link>
+          </div>
         </motion.div>
+
+        {/* ── Pipeline flow ── */}
+        <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.4 }}>
+          <p className="text-xs uppercase tracking-widest text-muted font-semibold mb-4">Optimization Pipeline</p>
+          <div className="glass rounded-2xl border border-border p-6">
+            <div className="flex flex-col sm:flex-row items-start sm:items-center gap-4 sm:gap-0">
+              {pipeline.map((step, i) => {
+                const Icon = step.icon
+                return (
+                  <div key={step.label} className="flex sm:flex-1 items-center gap-3 sm:gap-0">
+                    <div className="flex sm:flex-col items-center sm:items-start gap-3 sm:gap-2 flex-1 sm:px-4">
+                      <div className={`w-2 h-2 rounded-full ${step.dot} shrink-0`} />
+                      <div>
+                        <div className="flex items-center gap-1.5 mb-0.5">
+                          <Icon className={`w-3.5 h-3.5 ${step.color}`} />
+                          <span className={`text-xs font-bold ${step.color}`}>{step.label}</span>
+                        </div>
+                        <p className="text-[10px] text-muted leading-relaxed">{step.desc}</p>
+                      </div>
+                    </div>
+                    {i < pipeline.length - 1 && (
+                      <ArrowRight className="w-3.5 h-3.5 text-border shrink-0 hidden sm:block" />
+                    )}
+                  </div>
+                )
+              })}
+            </div>
+          </div>
+        </motion.div>
+
       </main>
+
+      {/* ── Alert History Panel ── */}
+      <AnimatePresence>
+        {historyOpen && (
+          <>
+            <motion.div
+              initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
+              className="fixed inset-0 bg-black/50 z-40"
+              onClick={() => setHistoryOpen(false)}
+            />
+            <motion.aside
+              initial={{ x: '100%' }} animate={{ x: 0 }} exit={{ x: '100%' }}
+              transition={{ type: 'spring', damping: 30, stiffness: 300 }}
+              className="fixed right-0 top-0 h-full w-full max-w-sm bg-surface border-l border-border z-50 flex flex-col"
+            >
+              <div className="flex items-center justify-between p-5 border-b border-border">
+                <div>
+                  <h2 className="font-bold text-text-main">Alert History</h2>
+                  <p className="text-xs text-muted mt-0.5">Today · {new Date().toLocaleDateString()}</p>
+                </div>
+                <button
+                  onClick={() => setHistoryOpen(false)}
+                  className="p-1.5 rounded-lg hover:bg-border/30 text-muted hover:text-text-main transition-colors"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+
+              <div className="flex-1 overflow-y-auto p-5 space-y-3">
+                {history.length === 0 ? (
+                  <div className="flex flex-col items-center justify-center h-40 text-center">
+                    <Activity className="w-8 h-8 text-muted mb-3" />
+                    <p className="text-sm font-medium text-text-main">No alerts today</p>
+                    <p className="text-xs text-muted mt-1">Alerts from the optimizer will appear here</p>
+                  </div>
+                ) : (
+                  history.map((entry, i) => (
+                    <div
+                      key={i}
+                      className={`glass rounded-xl border p-4 ${riskBg(entry.riskLevel)}`}
+                    >
+                      <div className="flex items-center justify-between mb-2">
+                        <span className={`text-xs font-bold uppercase ${riskColor(entry.riskLevel)}`}>
+                          {entry.riskLevel} risk
+                        </span>
+                        <span className="flex items-center gap-1 text-[10px] text-muted">
+                          <Clock className="w-3 h-3" />
+                          {fmtTime(entry.ts)}
+                        </span>
+                      </div>
+                      <div className="flex gap-4 mb-2">
+                        {entry.anomalyWindows > 0 && (
+                          <span className="text-[10px] text-red-400">
+                            {entry.anomalyWindows} anomaly window{entry.anomalyWindows !== 1 ? 's' : ''}
+                          </span>
+                        )}
+                        {entry.slaAlerts > 0 && (
+                          <span className="text-[10px] text-amber-400">
+                            {entry.slaAlerts} SLA alert{entry.slaAlerts !== 1 ? 's' : ''}
+                          </span>
+                        )}
+                      </div>
+                      {entry.summary && (
+                        <p className="text-[10px] text-muted leading-relaxed line-clamp-3">{entry.summary}</p>
+                      )}
+                    </div>
+                  ))
+                )}
+              </div>
+
+              <div className="p-5 border-t border-border">
+                <Link
+                  href="/inference/optimization"
+                  onClick={() => setHistoryOpen(false)}
+                  className="flex items-center justify-center gap-2 w-full rounded-xl px-4 py-2.5 text-sm font-semibold bg-primary/10 text-primary border border-primary/30 hover:bg-primary/20 transition-colors"
+                >
+                  Open Optimization Agent
+                  <ArrowRight className="w-4 h-4" />
+                </Link>
+              </div>
+            </motion.aside>
+          </>
+        )}
+      </AnimatePresence>
     </div>
   )
 }

@@ -14,6 +14,8 @@ import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
+import java.util.Map;
+
 @RestController
 @RequestMapping("/api/ai")
 @RequiredArgsConstructor
@@ -44,5 +46,16 @@ public class AiInferenceController {
     @PostMapping("/optimize/mock")
     public ResponseEntity<OptimizationResponseDto> optimizeMock() {
         return ResponseEntity.ok(aiInferenceService.runMockOptimization());
+    }
+
+    @GetMapping("/health")
+    public ResponseEntity<Map<String, String>> servicesHealth() {
+        return ResponseEntity.ok(aiInferenceService.getServicesHealth());
+    }
+
+    @PostMapping("/scenario")
+    public ResponseEntity<Map<String, Object>> triggerScenario(@RequestBody Map<String, String> body) {
+        String scenario = body.getOrDefault("scenario", "NORMAL");
+        return ResponseEntity.ok(aiInferenceService.triggerScenario(scenario));
     }
 }

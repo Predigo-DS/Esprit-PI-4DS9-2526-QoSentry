@@ -6,7 +6,7 @@ import { useForm } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
 import { z } from 'zod'
 import { motion } from 'framer-motion'
-import { Eye, EyeOff, Activity, Loader2, AlertCircle } from 'lucide-react'
+import { Eye, EyeOff, Activity, Loader2, AlertCircle, ArrowLeft } from 'lucide-react'
 import { loginApi } from '@/lib/api'
 import { useAuth } from '@/hooks/useAuth'
 import axios from 'axios'
@@ -72,7 +72,15 @@ export default function LoginForm() {
         <p className="text-muted text-sm mt-1">Sign in to QoSentry</p>
       </div>
 
-      <div className="glass rounded-2xl p-8">
+      <div className="glass rounded-2xl p-8 relative">
+        {/* Back to home */}
+        <Link
+          href="/"
+          className="absolute top-4 left-4 inline-flex items-center gap-1.5 text-xs font-medium text-muted hover:text-text-main transition-colors"
+        >
+          <ArrowLeft className="w-3.5 h-3.5" />
+          Home
+        </Link>
         {/* Global error */}
         {globalError && (
           <motion.div

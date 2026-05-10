@@ -38,6 +38,9 @@ public class AiInferenceServiceImpl implements AiInferenceService {
     @Value("${app.ai.agent-base-url:http://localhost:8002}")
     private String agentBaseUrl;
 
+    @Value("${app.ai.rag-base-url:http://localhost:8001}")
+    private String ragBaseUrl;
+
     @Value("${app.ai.allow-mock:true}")
     private boolean allowMockFallback;
 
@@ -315,6 +318,54 @@ public class AiInferenceServiceImpl implements AiInferenceService {
             avgs.put(field, n > 0 ? sums.get(field) / n : 0.0);
         }
         return avgs;
+    }
+
+    @Override
+    public Map<String, Object> triggerScenario(String scenario) {
+        try {
+            RestClient client = restClientBuilder.build();
+            Map<String, String> body = new HashMap<>();
+            body.put("scenario", scenario.toUpperCase());
+            JsonNode response = client.post()
+                    .uri(agentBaseUrl + "/scenario")
+                    .body(body)
+                    .retrieve()
+                    .body(JsonNode.class);
+            @SuppressWarnings("unchecked")
+            Map<String, Object> result = objectMapper.convertValue(response, Map.class);
+            return result;
+        } catch (Exception ex) {
+            Map<String, Object> err = new HashMap<>();
+            err.put("status", "error");
+            err.put("scenario", scenario);
+            err.put("message", "Mininet action server unreachable: " + ex.getMessage());
+            return err;
+        }
+    }
+
+    @Override
+    public Map<String, String> getServicesHealth() {
+        Map<String, String> status = new HashMap<>();
+        status.put("anomaly_detection", ping(anomalyBaseUrl + "/health"));
+        status.put("sla_forecasting",   ping(slaBaseUrl   + "/health"));
+        status.put("agent",             ping(agentBaseUrl + "/health"));
+        status.put("rag",               ping(ragBaseUrl   + "/health"));
+        return status;
+    }
+
+    private String ping(String url) {
+        java.net.HttpURLConnection conn = null;
+        try {
+            conn = (java.net.HttpURLConnection) new java.net.URL(url).openConnection();
+            conn.setConnectTimeout(3000);
+            conn.setReadTimeout(3000);
+            conn.setRequestMethod("GET");
+            return conn.getResponseCode() >= 200 && conn.getResponseCode() < 300 ? "online" : "offline";
+        } catch (Exception ex) {
+            return "offline";
+        } finally {
+            if (conn != null) conn.disconnect();
+        }
     }
 
     private JsonNode get(String url) {

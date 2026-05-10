@@ -13,6 +13,7 @@ import {
   Play,
   Sparkles,
 } from 'lucide-react'
+import { toast } from 'sonner'
 import { getRole, getUsername, isAuthenticated } from '@/lib/auth'
 import {
   SlaMetadataResponse,
@@ -147,8 +148,12 @@ export default function SlaInferencePage() {
         sla_alert_threshold: thresholdNum,
       })
       setResult(response)
+      const alerts = response.alert_count ?? response.predictions.filter(p => p.sla_alert).length
+      toast.success(`Forecast complete — ${alerts} SLA alert${alerts !== 1 ? 's' : ''} in ${response.predictions.length} windows`)
     } catch (error) {
-      setSubmitError(error instanceof Error ? error.message : 'Inference failed.')
+      const msg = error instanceof Error ? error.message : 'Inference failed.'
+      setSubmitError(msg)
+      toast.error(msg)
     } finally {
       setSubmitting(false)
     }

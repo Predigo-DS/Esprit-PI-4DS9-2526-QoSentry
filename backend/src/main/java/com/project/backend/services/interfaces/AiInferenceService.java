@@ -5,6 +5,8 @@ import com.project.backend.dtos.AnomalyInferenceRequestDto;
 import com.project.backend.dtos.OptimizationResponseDto;
 import com.project.backend.dtos.SlaInferenceRequestDto;
 
+import java.util.Map;
+
 public interface AiInferenceService {
 
     JsonNode getAnomalyMetadata();
@@ -16,4 +18,8 @@ public interface AiInferenceService {
     JsonNode predictSla(SlaInferenceRequestDto request);
 
     OptimizationResponseDto runMockOptimization();
+
+    Map<String, String> getServicesHealth();
+
+    Map<String, Object> triggerScenario(String scenario);
 }

@@ -18,7 +18,7 @@ const steps = [
     icon: Cpu,
     title: 'Analyze',
     description:
-      'AI models detect anomalies — DDoS, Link Failure, Congestion — with >85% accuracy using LSTM autoencoders. Prophet models forecast degradation trends up to 15 minutes ahead of impact.',
+      'An ensemble of BiLSTM, TCN, and Transformer autoencoders detects anomalies in real time. A separate TCN + BiLSTM ensemble forecasts QoE class and SLA breach risk windows before they occur.',
     color: 'secondary',
   },
   {
@@ -26,7 +26,7 @@ const steps = [
     icon: Zap,
     title: 'Act',
     description:
-      'Spring Boot API Gateway delivers real-time alerts, forecasts, and AI executive summaries to your dashboard. RL agents recommend corrective actions; reports are generated in under 2 minutes.',
+      'A LangGraph optimization agent orchestrates anomaly detection, SLA forecasting, and RAG retrieval to generate topology-aware remediation recommendations with full tool execution tracing.',
     color: 'accent',
   },
 ]

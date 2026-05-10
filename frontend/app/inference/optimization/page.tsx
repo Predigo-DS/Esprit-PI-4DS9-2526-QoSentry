@@ -9,13 +9,14 @@ import {
   Radio, Database, TrendingUp,
   WifiOff, BarChart2, RefreshCw,
   Network, Server, Clock, AlertOctagon,
+  ArrowRight, ArrowDown, ArrowUp, Minus,
 } from 'lucide-react'
 import Link from 'next/link'
 import {
   LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip,
   ResponsiveContainer, AreaChart, Area, ReferenceLine,
 } from 'recharts'
-import { isAuthenticated } from '@/lib/auth'
+import { isAuthenticated, getProfileRole, getRole } from '@/lib/auth'
 import {
   runMockOptimization, getTelemetryStatus, getLatestTelemetry,
   OptimizationResponse, ToolTraceEntry, getApiErrorMessage,
@@ -442,6 +443,119 @@ function ToolTraceCard({ entry }: { entry: ToolTraceEntry }) {
   )
 }
 
+// ─── Scenario + Before/After types ──────────────────────────────────────────
+
+interface MetricsSnapshot {
+  ts: number
+  plr: number
+  e2e_delay_ms: number
+  mos_voice: number
+  throughput_mbps: number
+}
+
+function DeltaBadge({ before, after, lowerIsBetter = true }: { before: number; after: number; lowerIsBetter?: boolean }) {
+  if (before === 0 && after === 0) return <Minus className="w-3 h-3 text-muted" />
+  const delta = after - before
+  const pct = before !== 0 ? Math.abs((delta / before) * 100) : 0
+  const improved = lowerIsBetter ? delta < 0 : delta > 0
+  const neutral = Math.abs(delta) < 0.001
+  if (neutral) return <span className="text-xs text-muted">—</span>
+  return (
+    <span className={`inline-flex items-center gap-0.5 text-xs font-bold ${improved ? 'text-emerald-400' : 'text-red-400'}`}>
+      {improved ? <ArrowDown className="w-3 h-3" /> : <ArrowUp className="w-3 h-3" />}
+      {pct.toFixed(1)}%
+    </span>
+  )
+}
+
+function BeforeAfterPanel({
+  before, after, awaitingAfter,
+}: {
+  before: MetricsSnapshot | null
+  after: MetricsSnapshot | null
+  awaitingAfter: boolean
+}) {
+  if (!before) return null
+
+  const rows: { label: string; unit: string; bVal: number; aVal: number; lowerIsBetter: boolean }[] = [
+    { label: 'Packet Loss Rate', unit: '%',   bVal: before.plr * 100,       aVal: after ? after.plr * 100       : 0, lowerIsBetter: true  },
+    { label: 'E2E Delay',        unit: 'ms',  bVal: before.e2e_delay_ms,    aVal: after ? after.e2e_delay_ms    : 0, lowerIsBetter: true  },
+    { label: 'Voice MOS',        unit: '',    bVal: before.mos_voice,        aVal: after ? after.mos_voice        : 0, lowerIsBetter: false },
+    { label: 'Throughput',       unit: 'Mbps',bVal: before.throughput_mbps, aVal: after ? after.throughput_mbps : 0, lowerIsBetter: false },
+  ]
+
+  return (
+    <div className="glass rounded-2xl border border-primary/30 p-6">
+      <div className="flex items-center gap-3 mb-5">
+        <div className="p-2 rounded-lg bg-primary/10">
+          <ArrowRight className="w-4 h-4 text-primary" />
+        </div>
+        <div>
+          <h3 className="text-sm font-bold text-white">Before / After Remediation</h3>
+          <p className="text-xs text-muted">
+            {after ? 'Agent remediation applied — metrics recovered' : awaitingAfter ? 'Waiting for next pipeline run to confirm recovery…' : 'Agent intervention detected'}
+          </p>
+        </div>
+        {awaitingAfter && !after && (
+          <span className="ml-auto flex items-center gap-1.5 text-xs text-amber-400">
+            <RefreshCw className="w-3 h-3 animate-spin" /> Awaiting next pipeline run…
+          </span>
+        )}
+        {after && (
+          <span className="ml-auto text-xs px-2 py-0.5 rounded-full bg-emerald-400/10 border border-emerald-400/30 text-emerald-400 font-bold">
+            ✓ Remediation complete
+          </span>
+        )}
+      </div>
+
+      <div className="overflow-x-auto">
+        <table className="w-full text-xs">
+          <thead>
+            <tr className="border-b border-border">
+              <th className="text-left py-2 px-3 text-muted font-semibold uppercase tracking-wider text-[10px]">Metric</th>
+              <th className="text-right py-2 px-3 text-muted font-semibold uppercase tracking-wider text-[10px]">Before</th>
+              <th className="text-right py-2 px-3 text-muted font-semibold uppercase tracking-wider text-[10px]">After</th>
+              <th className="text-right py-2 px-3 text-muted font-semibold uppercase tracking-wider text-[10px]">Change</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map(r => (
+              <tr key={r.label} className="border-b border-border/30 hover:bg-white/2">
+                <td className="py-2.5 px-3 font-semibold text-white">{r.label}</td>
+                <td className={`py-2.5 px-3 text-right font-mono font-bold ${
+                  r.lowerIsBetter
+                    ? r.bVal > (r.label === 'Packet Loss Rate' ? 5 : r.label === 'E2E Delay' ? 100 : 0) ? 'text-red-400' : 'text-emerald-400'
+                    : r.bVal < (r.label === 'Voice MOS' ? 3.5 : 5) ? 'text-amber-400' : 'text-emerald-400'
+                }`}>
+                  {r.bVal.toFixed(r.unit === '%' ? 2 : r.unit === 'ms' ? 1 : 2)}{r.unit}
+                </td>
+                <td className="py-2.5 px-3 text-right font-mono font-bold text-muted">
+                  {after ? (
+                    <span className={
+                      r.lowerIsBetter
+                        ? r.aVal > (r.label === 'Packet Loss Rate' ? 5 : r.label === 'E2E Delay' ? 100 : 0) ? 'text-red-400' : 'text-emerald-400'
+                        : r.aVal < (r.label === 'Voice MOS' ? 3.5 : 5) ? 'text-amber-400' : 'text-emerald-400'
+                    }>
+                      {r.aVal.toFixed(r.unit === '%' ? 2 : r.unit === 'ms' ? 1 : 2)}{r.unit}
+                    </span>
+                  ) : '—'}
+                </td>
+                <td className="py-2.5 px-3 text-right">
+                  {after ? (
+                    <DeltaBadge before={r.bVal} after={r.aVal} lowerIsBetter={r.lowerIsBetter} />
+                  ) : (
+                    <span className="text-muted text-[10px]">pending</span>
+                  )}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  )
+}
+
 // ─── Main page ───────────────────────────────────────────────────────────────
 
 const POLL_TELEMETRY_MS = 3_000   // status + raw rows
@@ -450,7 +564,9 @@ const POLL_PIPELINE_MS  = 60_000  // full AI pipeline — 60s to respect Groq fr
 export default function OptimizationPage() {
   const router = useRouter()
 
-  const [tab, setTab] = useState<'executive' | 'technical'>('executive')
+  const [profileRole, setProfileRole] = useState<'TECHNICAL' | 'EXECUTIVE'>('EXECUTIVE')
+  const [isAdmin, setIsAdmin]         = useState(false)
+  const [tab, setTab]                 = useState<'executive' | 'technical'>('executive')
   const [bufferSize, setBufferSize] = useState(0)
   const [isLive, setIsLive] = useState(false)
   const [history, setHistory] = useState<TimePoint[]>([])
@@ -461,16 +577,33 @@ export default function OptimizationPage() {
   const [running, setRunning] = useState(false)
   const [lastRun, setLastRun] = useState<Date | null>(null)
   const [countdown, setCountdown] = useState(POLL_PIPELINE_MS / 1000)
-  const [pipelineDelayMs, setPipelineDelayMs] = useState(POLL_PIPELINE_MS)
+  const [, setPipelineDelayMs] = useState(POLL_PIPELINE_MS)
+
+  // ── Before/after agent intervention state ────────────────────────────────
+  const [beforeSnapshot, setBeforeSnapshot]     = useState<MetricsSnapshot | null>(null)
+  const [afterSnapshot, setAfterSnapshot]       = useState<MetricsSnapshot | null>(null)
+  const [awaitingAfter, setAwaitingAfter]       = useState(false)
 
   const pipelineTimer = useRef<ReturnType<typeof setInterval> | null>(null)
   const countdownTimer = useRef<ReturnType<typeof setInterval> | null>(null)
   const telemetryTimer = useRef<ReturnType<typeof setInterval> | null>(null)
   const pipelineDelayRef = useRef(POLL_PIPELINE_MS)
+  const awaitingAfterRef = useRef(false)
+
+  // Stable refs for latest metric values (used in scenario snapshot callback)
+  const currentPlrRef   = useRef(0)
+  const currentDelayRef = useRef(0)
+  const currentMosRef   = useRef(0)
+  const currentTpRef    = useRef(0)
 
   // ── Auth guard ─────────────────────────────────────────────────────────────
   useEffect(() => {
-    if (!isAuthenticated()) router.push('/login')
+    if (!isAuthenticated()) { router.push('/login'); return }
+    const role = getRole()
+    setIsAdmin(role === 'ADMIN')
+    const pr = getProfileRole()
+    if (pr === 'TECHNICAL') setProfileRole('TECHNICAL')
+    else setProfileRole('EXECUTIVE')
   }, [router])
 
   // ── Fetch telemetry status + raw rows ─────────────────────────────────────
@@ -520,6 +653,33 @@ export default function OptimizationPage() {
       setResult(res)
       setPipelineError(null)
       setLastRun(new Date())
+
+      const avgM2 = (res.telemetry_summary as { avg_metrics?: Record<string, number> })?.avg_metrics ?? {}
+      const traceEntries = (res.tool_trace ?? []) as ToolTraceEntry[]
+
+      const snapshot = {
+        ts:              Date.now(),
+        plr:             avgM2.plr             ?? currentPlrRef.current,
+        e2e_delay_ms:    avgM2.e2e_delay_ms    ?? currentDelayRef.current,
+        mos_voice:       avgM2.mos_voice        ?? currentMosRef.current,
+        throughput_mbps: avgM2.throughput_mbps  ?? currentTpRef.current,
+      }
+
+      const tookRealAction = traceEntries.some(
+        t => t.tool !== 'monitor_only' && t.tool !== 'decision_summary_tool'
+      )
+
+      // Read awaitingAfter synchronously via ref to decide what to do
+      if (awaitingAfterRef.current) {
+        setAfterSnapshot(snapshot)
+        setAwaitingAfter(false)
+        awaitingAfterRef.current = false
+      } else if (tookRealAction) {
+        setBeforeSnapshot(snapshot)
+        setAfterSnapshot(null)
+        setAwaitingAfter(true)
+        awaitingAfterRef.current = true
+      }
 
       // Fallback: build a history point from avg_metrics when /latest is unavailable
       const avgM = (res.telemetry_summary as { avg_metrics?: Record<string, number> })?.avg_metrics
@@ -655,6 +815,13 @@ export default function OptimizationPage() {
   const currentDelay = recentRows.length > 0 ? avg(recentRows, 'e2e_delay_ms')     : (avg30.e2e_delay_ms ?? 0)
   const currentMos   = recentRows.length > 0 ? avg(recentRows, 'mos_voice')        : (avg30.mos_voice ?? 0)
   const currentPlr   = recentRows.length > 0 ? avg(recentRows, 'plr')              : (avg30.plr ?? 0)
+  const currentTp    = recentRows.length > 0 ? avg(recentRows, 'throughput_mbps')  : (avg30.throughput_mbps ?? 0)
+
+  // Keep refs in sync for stable snapshot inside callbacks
+  currentPlrRef.current   = currentPlr
+  currentDelayRef.current = currentDelay
+  currentMosRef.current   = currentMos
+  currentTpRef.current    = currentTp
   // availability: Mininet may send as ratio (0–1) or percentage (0–100) — normalize to %
   const rawAvail     = recentRows.length > 0 ? avg(recentRows, 'availability')     : (avg30.availability ?? 99.9)
   const currentAvail = rawAvail <= 1 && rawAvail >= 0 ? rawAvail * 100 : rawAvail
@@ -702,20 +869,30 @@ export default function OptimizationPage() {
           <span className="text-muted text-sm">/ Optimization</span>
         </div>
 
-        {/* Tab switcher */}
-        <div className="ml-4 flex items-center gap-1 bg-surface rounded-lg p-1 border border-border">
-          {(['executive', 'technical'] as const).map(t => (
+        {/* View selector — tab switcher for admin, read-only badge for regular users */}
+        {isAdmin ? (
+          <div className="ml-4 flex items-center gap-1 p-1 rounded-lg bg-surface border border-border">
             <button
-              key={t}
-              onClick={() => setTab(t)}
-              className={`px-4 py-1.5 rounded-md text-xs font-semibold transition-all capitalize ${
-                tab === t ? 'bg-primary text-white shadow' : 'text-muted hover:text-white'
-              }`}
+              onClick={() => setTab('executive')}
+              className={`px-3 py-1 rounded text-xs font-bold transition-all ${tab === 'executive' ? 'bg-primary text-white' : 'text-muted hover:text-white'}`}
             >
-              {t === 'executive' ? '📊 Executive' : '⚙️ Technical'}
+              📊 Executive
             </button>
-          ))}
-        </div>
+            <button
+              onClick={() => setTab('technical')}
+              className={`px-3 py-1 rounded text-xs font-bold transition-all ${tab === 'technical' ? 'bg-primary text-white' : 'text-muted hover:text-white'}`}
+            >
+              ⚙️ Technical
+            </button>
+          </div>
+        ) : (
+          <div className="ml-4 flex items-center gap-2 px-3 py-1.5 rounded-lg bg-surface border border-border">
+            <span className="text-xs font-semibold text-muted">View:</span>
+            <span className={`text-xs font-bold ${profileRole === 'TECHNICAL' ? 'text-primary' : 'text-secondary'}`}>
+              {profileRole === 'TECHNICAL' ? '⚙️ Technical' : '📊 Executive'}
+            </span>
+          </div>
+        )}
 
         <div className="ml-auto flex items-center gap-4">
           {/* Connection error badge */}
@@ -753,10 +930,44 @@ export default function OptimizationPage() {
         </div>
       </header>
 
-      <main className="max-w-7xl mx-auto px-6 py-8">
+      {/* ── Environment gate ─────────────────────────────────────────────── */}
+      {!isLive && (
+        <div className="max-w-7xl mx-auto px-6 py-24 flex flex-col items-center justify-center text-center">
+          <motion.div
+            initial={{ opacity: 0, y: 20 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ duration: 0.5 }}
+            className="glass rounded-3xl border border-amber-400/30 bg-amber-400/5 p-16 max-w-xl w-full"
+          >
+            <div className="w-16 h-16 rounded-2xl bg-amber-400/10 border border-amber-400/30 flex items-center justify-center mx-auto mb-6">
+              <WifiOff className="w-8 h-8 text-amber-400" />
+            </div>
+            <h2 className="text-2xl font-black text-white mb-3">Mininet environment not connected</h2>
+            <p className="text-muted text-sm leading-relaxed mb-8">
+              The optimization pipeline requires a live Mininet + Ryu SDN telemetry feed.
+              Start the network simulation and listener script, then this page will activate automatically.
+            </p>
+            <div className="space-y-3 text-left bg-black/20 rounded-xl p-5 font-mono text-xs text-muted border border-border">
+              <p className="text-amber-400 font-semibold mb-2"># Start the environment</p>
+              <p><span className="text-primary">1.</span> Start Mininet + Ryu controller on the VM</p>
+              <p><span className="text-primary">2.</span> Run <span className="text-white">python listen.py</span> to push telemetry to Redis</p>
+              <p><span className="text-primary">3.</span> This page will activate within 5 seconds</p>
+            </div>
+            <div className="flex items-center justify-center gap-2 mt-8 text-xs text-muted">
+              <span className="relative flex h-2 w-2">
+                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-muted opacity-40" />
+                <span className="relative inline-flex rounded-full h-2 w-2 bg-muted/60" />
+              </span>
+              Checking for live feed every 5s…
+            </div>
+          </motion.div>
+        </div>
+      )}
 
-        {/* ── EXECUTIVE TAB ──────────────────────────────────────────────── */}
-        {tab === 'executive' && (
+      <main className={`max-w-7xl mx-auto px-6 py-8 ${!isLive ? 'hidden' : ''}`}>
+
+        {/* ── EXECUTIVE VIEW ─────────────────────────────────────────────── */}
+        {(isAdmin ? tab === 'executive' : profileRole === 'EXECUTIVE') && (
           <motion.div key="exec" initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} className="space-y-6">
 
             <div>
@@ -823,8 +1034,8 @@ export default function OptimizationPage() {
           </motion.div>
         )}
 
-        {/* ── TECHNICAL TAB ──────────────────────────────────────────────── */}
-        {tab === 'technical' && (
+        {/* ── TECHNICAL VIEW ─────────────────────────────────────────────── */}
+        {(isAdmin ? tab === 'technical' : profileRole === 'TECHNICAL') && (
           <motion.div key="tech" initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} className="space-y-6">
 
             <div className="flex items-center justify-between">
@@ -848,6 +1059,13 @@ export default function OptimizationPage() {
 
             {/* Alert banner */}
             <AlertBanner anomalyResponse={anomaly} slaResponse={sla} />
+
+            {/* Before / After panel — auto-triggered by agent intervention */}
+            <BeforeAfterPanel
+              before={beforeSnapshot}
+              after={afterSnapshot}
+              awaitingAfter={awaitingAfter}
+            />
 
             {/* Latency chart + Packet Loss side by side */}
             <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">

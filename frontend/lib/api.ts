@@ -230,6 +230,18 @@ export function getApiErrorMessage(error: unknown): string {
   return 'Unexpected error'
 }
 
+export interface ServicesHealth {
+  anomaly_detection: 'online' | 'offline'
+  sla_forecasting:   'online' | 'offline'
+  agent:             'online' | 'offline'
+  rag:               'online' | 'offline'
+}
+
+export async function getServicesHealth(): Promise<ServicesHealth> {
+  const response = await apiClient.get<ServicesHealth>('/api/ai/health')
+  return response.data
+}
+
 export interface TelemetryStatus {
   buffer_size: number
   live_mode: boolean
@@ -242,5 +254,12 @@ export async function getTelemetryStatus(): Promise<TelemetryStatus> {
 
 export async function getLatestTelemetry(n = 60): Promise<Record<string, number | string | boolean>[]> {
   const response = await apiClient.get<Record<string, number | string | boolean>[]>(`/api/telemetry/latest?n=${n}`)
+  return response.data
+}
+
+export type ScenarioName = 'CALL_DROP' | 'POOR_VOICE_QUALITY' | 'LOW_THROUGHPUT' | 'HIGH_LATENCY' | 'CAPACITY_EXHAUSTED' | 'NORMAL'
+
+export async function triggerScenario(scenario: ScenarioName): Promise<{ status: string; scenario: string }> {
+  const response = await apiClient.post('/api/ai/scenario', { scenario })
   return response.data
 }

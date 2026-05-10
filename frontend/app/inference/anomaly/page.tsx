@@ -13,6 +13,7 @@ import {
   Play,
   Sparkles,
 } from 'lucide-react'
+import { toast } from 'sonner'
 import { getRole, getUsername, isAuthenticated } from '@/lib/auth'
 import {
   AnomalyMetadataResponse,
@@ -180,8 +181,12 @@ export default function AnomalyInferencePage() {
         threshold_name: thresholdName || undefined,
       })
       setResult(response)
+      const anomalyCount = response.windows.filter(w => w.is_anomaly).length
+      toast.success(`Inference complete — ${anomalyCount} / ${response.windows.length} windows anomalous`)
     } catch (error) {
-      setSubmitError(error instanceof Error ? error.message : 'Inference failed.')
+      const msg = error instanceof Error ? error.message : 'Inference failed.'
+      setSubmitError(msg)
+      toast.error(msg)
     } finally {
       setSubmitting(false)
     }
