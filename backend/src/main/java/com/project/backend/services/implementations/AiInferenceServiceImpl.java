@@ -321,6 +321,29 @@ public class AiInferenceServiceImpl implements AiInferenceService {
     }
 
     @Override
+    public Map<String, Object> triggerScenario(String scenario) {
+        try {
+            RestClient client = restClientBuilder.build();
+            Map<String, String> body = new HashMap<>();
+            body.put("scenario", scenario.toUpperCase());
+            JsonNode response = client.post()
+                    .uri(agentBaseUrl + "/scenario")
+                    .body(body)
+                    .retrieve()
+                    .body(JsonNode.class);
+            @SuppressWarnings("unchecked")
+            Map<String, Object> result = objectMapper.convertValue(response, Map.class);
+            return result;
+        } catch (Exception ex) {
+            Map<String, Object> err = new HashMap<>();
+            err.put("status", "error");
+            err.put("scenario", scenario);
+            err.put("message", "Mininet action server unreachable: " + ex.getMessage());
+            return err;
+        }
+    }
+
+    @Override
     public Map<String, String> getServicesHealth() {
         Map<String, String> status = new HashMap<>();
         status.put("anomaly_detection", ping(anomalyBaseUrl + "/health"));

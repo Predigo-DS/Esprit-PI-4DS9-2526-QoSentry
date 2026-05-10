@@ -20,4 +20,6 @@ public interface AiInferenceService {
     OptimizationResponseDto runMockOptimization();
 
     Map<String, String> getServicesHealth();
+
+    Map<String, Object> triggerScenario(String scenario);
 }

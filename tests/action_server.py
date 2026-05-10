@@ -12,7 +12,7 @@ Uses the same tc/netem mechanism as traffic_gen.py to reduce packet loss.
 
 import re
 import subprocess
-from typing import Optional
+from typing import Dict, List, Optional, Tuple
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
@@ -21,7 +21,7 @@ app = FastAPI(title="QoSentry SDN Action Executor", version="1.0")
 
 
 # ---------------------------------------------------------------------------
-# Request model
+# Request models
 # ---------------------------------------------------------------------------
 
 class SDNAction(BaseModel):
@@ -33,6 +33,10 @@ class SDNAction(BaseModel):
     profile: Optional[str] = None
     segment: Optional[str] = None
     reason: Optional[str] = None
+
+
+class ScenarioRequest(BaseModel):
+    scenario: str  # CALL_DROP | POOR_VOICE_QUALITY | LOW_THROUGHPUT | HIGH_LATENCY | CAPACITY_EXHAUSTED | NORMAL
 
 
 # ---------------------------------------------------------------------------
@@ -57,6 +61,17 @@ DEVICE_ALIASES = {
     "switch-core-01": "s1",
     "core": "s1",
     "s1": "s1",
+}
+
+# Scenario definitions — (iface, loss%, delay_ms, jitter_ms)
+SCENARIO_PARAMS: Dict[str, List[Tuple[str, float, float, float]]] = {
+    "CALL_DROP":          [("s1-eth1", 70, 5,   2), ("s1-eth2", 75, 15,  5)],
+    "POOR_VOICE_QUALITY": [("s1-eth2", 15, 80,  10)],
+    "LOW_THROUGHPUT":     [("s1-eth3", 30, 2,   1)],
+    "HIGH_LATENCY":       [("s1-eth1", 2,  250, 30), ("s1-eth2", 8, 300, 40)],
+    "CAPACITY_EXHAUSTED": [("s1-eth1", 25, 5,   2), ("s1-eth2", 30, 15, 5),
+                           ("s1-eth3", 20, 2,   1), ("s1-eth4", 25, 20, 3)],
+    "NORMAL":             [],  # restore all to baseline
 }
 
 
@@ -90,10 +105,7 @@ def _get_tc_qdisc_info(iface: str) -> Optional[dict]:
 
 
 def _set_netem(iface: str, loss_pct: float, delay_ms: float, jitter_ms: float) -> dict:
-    """
-    Apply tc netem parameters on iface — same mechanism as traffic_gen.py set_netem().
-    Reduces packet loss by setting lower loss_pct.
-    """
+    """Apply tc netem parameters on iface — same mechanism as traffic_gen.py set_netem()."""
     info = _get_tc_qdisc_info(iface)
     if not info:
         return {"ok": False, "cmd": "", "stderr": f"No netem qdisc found on {iface}"}
@@ -154,7 +166,6 @@ def _resolve_iface(raw: str) -> str:
     return "s1-eth1"
 
 
-
 # ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
@@ -164,70 +175,69 @@ def health():
     return {"status": "ok"}
 
 
+@app.post("/scenario")
+def inject_scenario(req: ScenarioRequest):
+    """Inject a named degradation scenario via tc/netem."""
+    name = req.scenario.upper()
+    if name not in SCENARIO_PARAMS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unknown scenario: {name!r}. Valid: {list(SCENARIO_PARAMS)}"
+        )
+
+    results = []
+    if name == "NORMAL":
+        for iface in BASELINE:
+            results.append(_restore_baseline(iface))
+        print(f"[SCENARIO] NORMAL -> all interfaces restored to baseline")
+    else:
+        for (iface, loss, delay, jitter) in SCENARIO_PARAMS[name]:
+            results.append(_set_netem(iface, loss, delay, jitter))
+        print(f"[SCENARIO] {name} -> injected on {[t[0] for t in SCENARIO_PARAMS[name]]}")
+
+    all_ok = all(r.get("ok", False) for r in results)
+    return {
+        "status": "ok" if all_ok else "partial_error",
+        "scenario": name,
+        "interfaces_affected": [t[0] for t in SCENARIO_PARAMS.get(name, [])] or list(BASELINE.keys()),
+        "results": results,
+    }
+
+
 @app.post("/action")
 def execute_action(action: SDNAction):
     bridge = _resolve_device(action.device)
     results = []
 
-    # ------------------------------------------------------------------
-    # reroute_traffic:
-    #   Reduce loss on the backup path interface to near-zero so traffic
-    #   effectively shifts to it. Uses same netem mechanism as traffic_gen.
-    # ------------------------------------------------------------------
     if action.action == "reroute_traffic":
-        # Primary iface derived from path hint, default s1-eth2 (INDOOR_RAN backup)
         iface = _resolve_iface(action.path or "s1-eth2")
         b = BASELINE.get(iface, {"delay": 5, "jitter": 2})
-        # Reduce loss to near zero on the target path to attract traffic
         results.append(_set_netem(iface, loss_pct=0.5, delay_ms=b["delay"], jitter_ms=b["jitter"]))
         print(f"[ACTION] reroute_traffic -> loss reduced on {iface}")
 
-    # ------------------------------------------------------------------
-    # throttle_link:
-    #   In traffic_gen, high loss = degraded link. Here we do the inverse:
-    #   reduce loss on the congested interface to relieve it.
-    # ------------------------------------------------------------------
     elif action.action == "throttle_link":
         iface = _resolve_iface(action.interface or "s1-eth1")
         b = BASELINE.get(iface, {"delay": 5, "jitter": 2})
-        # Clamp loss to baseline level to stop artificial congestion
         results.append(_set_netem(iface, loss_pct=b["loss"], delay_ms=b["delay"], jitter_ms=b["jitter"]))
         print(f"[ACTION] throttle_link -> restored baseline loss on {iface}")
 
-    # ------------------------------------------------------------------
-    # restart_interface:
-    #   Full netem reset on the interface back to baseline.
-    # ------------------------------------------------------------------
     elif action.action == "restart_interface":
         iface = _resolve_iface(action.interface or "s1-eth1")
         results.append(_restore_baseline(iface))
         print(f"[ACTION] restart_interface -> netem reset on {iface}")
 
-    # ------------------------------------------------------------------
-    # apply_qos_profile:
-    #   Reduce loss aggressively across all s1 interfaces.
-    #   "voice-video-priority" -> bring all links to baseline or better.
-    #   "high-priority-qos"    -> bring all links to baseline.
-    # ------------------------------------------------------------------
     elif action.action == "apply_qos_profile":
         profile = action.profile or ""
-
         if "voice" in profile or "video" in profile:
-            # Voice/video: near-zero loss on voice paths, baseline on others
             results.append(_set_netem("s1-eth1", loss_pct=0.5, delay_ms=5,  jitter_ms=1))
             results.append(_set_netem("s1-eth2", loss_pct=1.0, delay_ms=15, jitter_ms=3))
             results.append(_set_netem("s1-eth3", loss_pct=0.5, delay_ms=2,  jitter_ms=1))
             results.append(_set_netem("s1-eth4", loss_pct=1.0, delay_ms=20, jitter_ms=2))
         else:
-            # General QoS: restore all interfaces to baseline
             for iface in BASELINE:
                 results.append(_restore_baseline(iface))
-
         print(f"[ACTION] apply_qos_profile '{profile}' -> loss reduced on all s1 interfaces")
 
-    # ------------------------------------------------------------------
-    # monitor_only: no TC change
-    # ------------------------------------------------------------------
     elif action.action == "monitor_only":
         print(f"[ACTION] monitor_only - {action.reason or 'no change'}")
         return {"status": "ok", "action": "monitor_only", "results": []}

@@ -52,4 +52,10 @@ public class AiInferenceController {
     public ResponseEntity<Map<String, String>> servicesHealth() {
         return ResponseEntity.ok(aiInferenceService.getServicesHealth());
     }
+
+    @PostMapping("/scenario")
+    public ResponseEntity<Map<String, Object>> triggerScenario(@RequestBody Map<String, String> body) {
+        String scenario = body.getOrDefault("scenario", "NORMAL");
+        return ResponseEntity.ok(aiInferenceService.triggerScenario(scenario));
+    }
 }

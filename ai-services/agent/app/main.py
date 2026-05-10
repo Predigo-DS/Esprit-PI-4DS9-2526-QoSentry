@@ -784,6 +784,19 @@ async def optimization_respond(req: OptimizationRequest):
         AGENT_OPT_LATENCY.observe(time.time() - t0)
 
 
+@app.post("/scenario")
+async def trigger_scenario(body: dict):
+    """Proxy scenario injection to the Mininet action server."""
+    from optimization_graph import MININET_API_URL
+    url = MININET_API_URL.rstrip("/") + "/scenario"
+    try:
+        async with httpx.AsyncClient(timeout=8) as client:
+            resp = await client.post(url, json=body)
+            return resp.json()
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Mininet action server unreachable: {e}")
+
+
 @app.post("/v1/chat/completions")
 async def openai_chat_completions(req: OpenAIChatRequest):
     if req.stream:
